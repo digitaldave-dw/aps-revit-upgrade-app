@@ -51,9 +51,18 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="FileUpgraderApp.bundle\Contents\FileUpgrader.addin" />
-    <Content Include="FileUpgraderApp.bundle\PackageContents.xml" />
+    <Content Include="FileUpgraderApp2024.bundle\Contents\FileUpgrader.addin" />
+    <Content Include="FileUpgraderApp2024.bundle\PackageContents.xml" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <PropertyGroup>
+    <PostBuildEvent>
+xcopy /Y /F "$(ProjectDir)FileUpgraderApp.bundle\Contents\FileUpgrader.addin" "$(AppData)\Autodesk\REVIT\Addins\2024"
+xcopy /Y /F "$(ProjectDir)bin\Debug\FileUpgrader.dll" "$(AppData)\Autodesk\REVIT\Addins\2024”
+xcopy /Y /F "$(TargetDir)*.dll" "$(ProjectDir)FileUpgraderApp.bundle\Contents\"
+del /F "$(ProjectDir)..\..\..\public\bundles\FileUpgraderApp.zip"
+"C:\Program Files\7-Zip\7z.exe" a -tzip "$(ProjectDir)../../../public/bundles/FileUpgraderApp.zip" "$(ProjectDir)FileUpgraderApp.bundle\" -xr0!*.pdb
+</PostBuildEvent>
+  </PropertyGroup>
 </Project>
