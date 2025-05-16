@@ -63,8 +63,8 @@ router.get('/designautomation/engines', async(req, res, next) => {
             paginationToken = engines.paginationToken;
         }
 
-        const engineList = Allengines.filter( (engine ) => {
-            return (engine.indexOf('Revit+2023') >= 0)
+        const engineList = Allengines.filter((engine) => {
+            return (engine.indexOf('Revit+2023') >= 0 || engine.indexOf('Revit+2024') >= 0)
         }).sort((a, b) => (a > b ? -1 : 1));
         res.status(200).end(JSON.stringify(engineList));
     } catch (err) {
