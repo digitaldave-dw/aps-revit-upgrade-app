@@ -18,6 +18,7 @@
 
 const express = require('express');
 const config = require('../config');
+const request = require("request");
 
 const {
     ItemsApi,
@@ -34,7 +35,11 @@ const {
     getNewCreatedStorageInfo, 
     createBodyOfPostVersion,
     createBodyOfPostItem,
-    workitemList 
+    workitemList,
+    isFileAlreadyUpgraded,
+    logPayload,
+    createNewVersionDirectApi,
+    checkFileExists,
 } = require('./common/da4revitImp')
 
 const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
@@ -66,6 +71,17 @@ router.use(async (req, res, next) => {
 router.post('/da4revit/v1/upgrader/files', async (req, res, next) => {
     const fileItemId   = req.body.fileItemId;
     const fileItemName = req.body.fileItemName;
+    const inPlace = true;
+    const targetVersion = req.body.targetVersion || "2023";
+
+    const fileNameParts = fileItemName.split('.');
+    const fileExtension = fileNameParts[fileNameParts.length-1].toLowerCase();
+
+    if (fileExtension !== 'rvt' && fileExtension !== 'rfa' && fileExtension !== 'fte') {
+        console.log('info: the file format is not supported');
+        res.status(500).end('the file format is not supported');
+        return;
+    }
 
     if (fileItemId === '' || fileItemName === '') {
         res.status(500).end();
@@ -90,65 +106,82 @@ router.post('/da4revit/v1/upgrader/files', async (req, res, next) => {
     const resourceId = params[params.length - 1];
     const projectId = params[params.length - 3];
 
+    console.log(`Setting up in-place upgrade with isNewVersion=true for file: ${fileItemName}`);
+
     try {
+        // Check if file was already upgraded to this version
+        const alreadyUpgraded = await isFileAlreadyUpgraded(
+            projectId, 
+            resourceId, 
+            targetVersion, 
+            req.oauth_client, 
+            req.oauth_token
+        );
+        
+        if (alreadyUpgraded) {
+            console.log(`File ${fileItemName} already upgraded to ${targetVersion}`);
+            res.status(200).json({
+                "fileName": fileItemName,
+                "status": "AlreadyUpgraded",
+                "message": `File was already upgraded to ${targetVersion}`
+            });
+            return;
+        }
+        
+        // Get parent folder
         const items = new ItemsApi();
         const folder = await items.getItemParentFolder(projectId, resourceId, req.oauth_client, req.oauth_token);
-        if(folder === null || folder.statusCode !== 200){
-            console.log('failed to get the parent folder.');
-            res.status(500).end('ailed to get the parent folder');
-            return;
-        }
-
-        const fileParams = fileItemName.split('.');
-        const fileExtension = fileParams[fileParams.length-1].toLowerCase();
-        if( fileExtension !== 'rvt' && fileExtension !== 'rfa' && fileExtension !== 'fte'){
-            console.log('info: the file format is not supported');
-            res.status(500).end('the file format is not supported');
-            return;
-        }
-
-        const storageInfo = await getNewCreatedStorageInfo(projectId, folder.body.data.id, fileItemName, req.oauth_client, req.oauth_token);
-        if (storageInfo === null ) {
-            console.log('failed to create the storage');
-            res.status(500).end('failed to create the storage');
-            return;
-        }
-
-        // get the storage of the input item version
+        
+        // Get version info
         const versionInfo = await getLatestVersionInfo(projectId, resourceId, req.oauth_client, req.oauth_token);
-        if (versionInfo === null ) {
-            console.log('failed to get lastest version of the file');
-            res.status(500).end('failed to get lastest version of the file');
-            return;
-        }
         const inputStorageId = versionInfo.versionStorageId;
-
-        const createVersionBody = createBodyOfPostVersion(resourceId,fileItemName, storageInfo.StorageId, versionInfo.versionType);
-        if (createVersionBody === null ) {
-            console.log('failed to create body of Post Version');
-            res.status(500).end('failed to create body of Post Version');
-            return;
-        }
-
-        ////////////////////////////////////////////////////////////////////////////////
-        // use 2 legged token for design automation
+        
+        // Create storage for upgraded file
+        const storageInfo = await getNewCreatedStorageInfo(
+            projectId, 
+            folder.body.data.id, 
+            fileItemName, // Keep the original name
+            req.oauth_client, 
+            req.oauth_token
+        );
+        
+        // Create version body - passing target version for metadata
+        const createVersionBody = createBodyOfPostVersion(
+            resourceId,
+            fileItemName, 
+            storageInfo.StorageId,
+            versionInfo.versionType,
+            targetVersion
+        );
+        
+        // Log the payload before sending
+        logPayload('Version Creation Payload', createVersionBody);
+        
+        // Process upgrade
         const oauth = new OAuth(req.session);
-        const oauth_client = oauth.get2LeggedClient();;
+        const oauth_client = oauth.get2LeggedClient();
         const oauth_token = await oauth_client.authenticate();
-        let upgradeRes = await upgradeFile(inputStorageId, storageInfo.StorageId, projectId, createVersionBody, fileExtension, req.oauth_token, oauth_token );
-        if(upgradeRes === null || upgradeRes.statusCode !== 200 ){
-            console.log('failed to upgrade the revit file');
-            res.status(500).end('failed to upgrade the revit file');
-            return;
-        }
-        console.log('Submitted the workitem: '+ upgradeRes.body.id);
+        
+        let upgradeRes = await upgradeFile(
+            inputStorageId, 
+            storageInfo.StorageId, 
+            projectId, 
+            createVersionBody, 
+            fileExtension, 
+            req.oauth_token, 
+            oauth_token,
+            true 
+        );
+        
+        console.log('Submitted the workitem: ' + upgradeRes.body.id);
         const upgradeInfo = {
             "fileName": fileItemName,
             "workItemId": upgradeRes.body.id,
-            "workItemStatus": upgradeRes.body.status
+            "workItemStatus": upgradeRes.body.status,
+            "targetVersion": targetVersion
         };
+        
         res.status(200).end(JSON.stringify(upgradeInfo));
-
     } catch (err) {
         console.log('get exception while upgrading the file')
         res.status(500).end(err);
@@ -330,6 +363,7 @@ router.get('/da4revit/v1/upgrader/files/:file_workitem_id', async(req, res, next
 ///////////////////////////////////////////////////////////////////////
 /// Handles the callback from Design Automation after job completion
 ///////////////////////////////////////////////////////////////////////
+// Fix for the callback handler in da4revit.js
 router.post('/callback/designautomation', async (req, res, next) => {
     // Best practice is to acknowledge receipt immediately
     res.status(202).end();
@@ -353,60 +387,313 @@ router.post('/callback/designautomation', async (req, res, next) => {
         let index = workitemList.indexOf(workitem);
         workitemStatus.Status = 'Success';
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-        console.log("Post handle the workitem: " + workitem.workitemId);
+        console.log("Processing workitem: " + workitem.workitemId);
+        console.log("Is new version flag: ", workitem.isNewVersion);
 
-        const type = workitem.createVersionData.data.type;
         try {
-            // Use the token stored with the workitem
-            const credentials = workitem.access_token_3Legged;
+            // Create a new OAuth instance and properly set up the session with token info
+            const oauth = new OAuth();
             
-            if (!credentials || !credentials.access_token) {
-                console.log("No valid token available in workitem for BIM360/ACC operation");
+            // Use the token info we carefully stored in the workitem
+            if (workitem.access_token_3Legged) {
+                oauth._session = {
+                    internal_token: workitem.access_token_3Legged.access_token,
+                    refresh_token: workitem.access_token_3Legged.refresh_token,
+                    expires_at: workitem.access_token_3Legged.expires_at
+                };
+                
+                console.log("Session reconstructed with tokens from workitem");
+            } else {
+                console.log("No token information available in workitem");
                 workitemStatus.Status = 'Failed';
-                workitemStatus.Error = 'Authentication error - missing token';
+                workitemStatus.Error = 'Missing authentication data';
                 global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
                 return;
             }
             
-            console.log("Using token from workitem for BIM360 operation");
+            // Get a fresh token using the session we reconstructed
+            console.log("Obtaining fresh token...");
+            const credentials = await oauth.getInternalToken();
             
-            // Use the existing client from workitem instead of creating a new one
-            // This avoids the need to create a new client with credentials
-            let oauth_client = null;
-            
-            // Simpler approach - reuse the existing client from the OAuth object
-            const oauth = new OAuth(); // Don't need the session parameter
-            oauth_client = oauth.getClient(); // Get the client without a session
-            
-            // Log what we're about to do
-            console.log(`Creating ${type === "versions" ? "new version" : "new item"} in BIM360/ACC`);
-            console.log(`Project ID: ${workitem.projectId}`);
-            
-            let version = null;
-            if (type === "versions") {
-                const versions = new VersionsApi();
-                version = await versions.postVersion(
-                    workitem.projectId, 
-                    workitem.createVersionData, 
-                    oauth_client, 
-                    credentials
-                );
-            } else {
-                const items = new ItemsApi();
-                version = await items.postItem(
-                    workitem.projectId, 
-                    workitem.createVersionData, 
-                    oauth_client, 
-                    credentials
-                );
+            if (!credentials) {
+                console.log("Failed to get valid token");
+                workitemStatus.Status = 'Failed';
+                workitemStatus.Error = 'Authentication failed';
+                global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                return;
             }
             
-            if (version === null || version.statusCode !== 201) {
-                console.log('Failed to create a new version of the file');
+            console.log("Valid token obtained, proceeding with API calls");
+            
+            // Extract project ID first (common to both cases)
+            const projectId = workitem.projectId;
+            if (!projectId) {
+                throw new Error("Missing project ID in workitem");
+            }
+            
+            // Initialize variables we'll extract from the workitem
+            let fileItemId = null;
+            let storageId = null;
+            let fileName = null;
+            let versionType = null;
+            
+            // Log the actual workitem data structure for debugging
+            console.log("Workitem createVersionData structure:", 
+                        JSON.stringify(workitem.createVersionData, null, 2));
+            
+            // Extract data differently based on whether this is a new version or new item
+            if (workitem.isNewVersion === true) {
+                console.log("Processing as new version");
+                
+                // For new version: get data from version relationships
+                if (workitem.createVersionData && 
+                    workitem.createVersionData.data && 
+                    workitem.createVersionData.data.relationships) {
+                    
+                    // Get item ID
+                    if (workitem.createVersionData.data.relationships.item && 
+                        workitem.createVersionData.data.relationships.item.data) {
+                        fileItemId = workitem.createVersionData.data.relationships.item.data.id;
+                    }
+                    
+                    // Get storage ID
+                    if (workitem.createVersionData.data.relationships.storage && 
+                        workitem.createVersionData.data.relationships.storage.data) {
+                        storageId = workitem.createVersionData.data.relationships.storage.data.id;
+                    }
+                }
+                
+                // Get filename and version type
+                if (workitem.createVersionData && 
+                    workitem.createVersionData.data && 
+                    workitem.createVersionData.data.attributes) {
+                    
+                    fileName = workitem.createVersionData.data.attributes.name;
+                    
+                    if (workitem.createVersionData.data.attributes.extension) {
+                        versionType = workitem.createVersionData.data.attributes.extension.type;
+                    }
+                }
+            } else {
+                console.log("Processing as new item");
+                
+                // For new item: most data comes from the 'included' array (first version)
+                if (workitem.createVersionData && 
+                    workitem.createVersionData.included && 
+                    workitem.createVersionData.included.length > 0) {
+                    
+                    const firstVersion = workitem.createVersionData.included[0];
+                    
+                    // Get storage ID from included version
+                    if (firstVersion.relationships && 
+                        firstVersion.relationships.storage && 
+                        firstVersion.relationships.storage.data) {
+                        storageId = firstVersion.relationships.storage.data.id;
+                    }
+                    
+                    // Get filename and version type from included version
+                    if (firstVersion.attributes) {
+                        fileName = firstVersion.attributes.name;
+                        
+                        if (firstVersion.attributes.extension) {
+                            versionType = firstVersion.attributes.extension.type;
+                        }
+                    }
+                }
+                
+                // For a new item, the parent folder ID is important
+                if (workitem.createVersionData && 
+                    workitem.createVersionData.data && 
+                    workitem.createVersionData.data.relationships &&
+                    workitem.createVersionData.data.relationships.parent &&
+                    workitem.createVersionData.data.relationships.parent.data) {
+                    
+                    // Store folder ID (not used directly for API call but useful for logging)
+                    const folderId = workitem.createVersionData.data.relationships.parent.data.id;
+                    console.log("Parent folder ID:", folderId);
+                }
+            }
+            
+            // Log the extracted data for debugging
+            console.log("Extracted data from workitem:");
+            console.log("- Project ID:", projectId);
+            console.log("- File Item ID:", fileItemId);
+            console.log("- Storage ID:", storageId);
+            console.log("- File Name:", fileName);
+            console.log("- Version Type:", versionType);
+            
+            // Verify we have the minimum required data
+            if (!projectId || !storageId || !fileName) {
+                throw new Error(`Missing required data from workitem: projectId=${projectId}, storageId=${storageId}, fileName=${fileName}`);
+            }
+            
+            // For version creation, we must have an item ID
+            if (workitem.isNewVersion === true && !fileItemId) {
+                throw new Error("Missing item ID required for version creation");
+            }
+            
+            // Process using the direct API approach
+            let version = null;
+            
+            try {
+                console.log(`Creating ${workitem.isNewVersion ? 'new version' : 'new item'} with direct API`);
+                
+                // Choose endpoint based on operation type
+                const apiEndpoint = workitem.isNewVersion === true 
+                    ? `https://developer.api.autodesk.com/data/v1/projects/${projectId}/versions`
+                    : `https://developer.api.autodesk.com/data/v1/projects/${projectId}/items`;
+                
+                console.log("Using API endpoint:", apiEndpoint);
+                
+                // Create API request body based on operation type
+                const requestBody = workitem.isNewVersion === true
+                    ? {
+                        "jsonapi": { "version": "1.0" },
+                        "data": {
+                            "type": "versions",
+                            "attributes": {
+                                "name": fileName,
+                                "extension": {
+                                    "type": versionType,
+                                    "version": "1.0"
+                                }
+                            },
+                            "relationships": {
+                                "item": {
+                                    "data": {
+                                        "type": "items",
+                                        "id": fileItemId
+                                    }
+                                },
+                                "storage": {
+                                    "data": {
+                                        "type": "objects",
+                                        "id": storageId
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    : workitem.createVersionData; // For new items, use the original payload
+                
+                // Log the request body for debugging
+                console.log("API request body:", JSON.stringify(requestBody, null, 2));
+                
+                // Create request options
+                const options = {
+                    method: 'POST',
+                    url: apiEndpoint,
+                    headers: {
+                        'Content-Type': 'application/vnd.api+json',
+                        'Authorization': `Bearer ${credentials.access_token}`
+                    },
+                    body: JSON.stringify(requestBody)
+                };
+                
+                // Make the request using the request library
+                version = await new Promise((resolve, reject) => {
+                    request(options, (error, response, body) => {
+                        if (error) {
+                            reject(error);
+                            return;
+                        }
+                        
+                        console.log('Direct API response status:', response.statusCode);
+                        
+                        let responseData;
+                        try {
+                            responseData = JSON.parse(body);
+                            console.log('Response body:', JSON.stringify(responseData, null, 2));
+                        } catch (e) {
+                            console.log('Response is not JSON:', body);
+                            responseData = body;
+                        }
+                        
+                        if (response.statusCode >= 400) {
+                            // If we get a conflict, try with a timestamp
+                            if (response.statusCode === 409) {
+                                console.log('Conflict detected, trying with timestamp...');
+                                const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+                                const fileNameParts = fileName.split('.');
+                                const extension = fileNameParts.pop();
+                                const baseName = fileNameParts.join('.');
+                                const newName = `${baseName}_${timestamp}.${extension}`;
+                                
+                                // Update options with new name
+                                const updatedOptions = { ...options };
+                                const updatedBody = JSON.parse(updatedOptions.body);
+                                
+                                // Update the name in the appropriate place based on operation type
+                                if (workitem.isNewVersion === true) {
+                                    updatedBody.data.attributes.name = newName;
+                                } else {
+                                    // For new item, update both main data and included version
+                                    updatedBody.data.attributes.name = newName;
+                                    if (updatedBody.included && updatedBody.included.length > 0) {
+                                        updatedBody.included[0].attributes.name = newName;
+                                    }
+                                }
+                                
+                                updatedOptions.body = JSON.stringify(updatedBody);
+                                
+                                console.log('Retrying with name:', newName);
+                                
+                                // Try again with timestamp
+                                request(updatedOptions, (err2, resp2, body2) => {
+                                    if (err2) {
+                                        reject(err2);
+                                        return;
+                                    }
+                                    
+                                    console.log('Retry status:', resp2.statusCode);
+                                    
+                                    if (resp2.statusCode >= 400) {
+                                        reject({
+                                            statusCode: resp2.statusCode,
+                                            body: body2
+                                        });
+                                    } else {
+                                        try {
+                                            const data = JSON.parse(body2);
+                                            resolve({
+                                                statusCode: resp2.statusCode,
+                                                body: data
+                                            });
+                                        } catch (e) {
+                                            resolve({
+                                                statusCode: resp2.statusCode,
+                                                body: body2
+                                            });
+                                        }
+                                    }
+                                });
+                            } else {
+                                reject({
+                                    statusCode: response.statusCode,
+                                    body: responseData
+                                });
+                            }
+                        } else {
+                            resolve({
+                                statusCode: response.statusCode,
+                                body: responseData
+                            });
+                        }
+                    });
+                });
+                
+                console.log(`Successfully created ${workitem.isNewVersion ? 'new version' : 'new item'}!`);
+            } catch (err) {
+                console.log("Direct API failed:", err);
+                throw err;
+            }
+            
+            if (version === null || (version.statusCode !== 201 && version.statusCode !== 200)) {
+                console.log(`Failed to create ${workitem.isNewVersion ? 'new version' : 'new item'}`);
                 workitemStatus.Status = 'Failed';
                 workitemStatus.Error = 'BIM360/ACC API call failed';
             } else {
-                console.log('Successfully created a new version of the file');
+                console.log(`Successfully created ${workitem.isNewVersion ? 'new version' : 'new item'}`);
                 workitemStatus.Status = 'Completed';
             }
             
@@ -414,42 +701,38 @@ router.post('/callback/designautomation', async (req, res, next) => {
         } catch (err) {
             console.log('Error details:', err);
             
-            // Enhanced error logging for better troubleshooting
+            let errorDetail = 'Unknown error';
+            
+            if (err.statusCode) {
+                errorDetail = `Status ${err.statusCode}: ${err.statusMessage || 'Unknown error'}`;
+            }
+            
             if (err.response) {
                 console.log('Response status:', err.response.status);
                 if (err.response.data) {
                     console.log('Response data:', JSON.stringify(err.response.data, null, 2));
+                    errorDetail = JSON.stringify(err.response.data);
                 }
-                
-                // Specific handling for common errors
-                if (err.response.status === 403) {
-                    console.log('Permission error - check BIM360/ACC project permissions');
-                    workitemStatus.Error = 'Permission error - check project permissions';
-                } else if (err.response.status === 401) {
-                    console.log('Authentication error - token might be expired');
-                    workitemStatus.Error = 'Authentication error - token expired';
-                } else {
-                    workitemStatus.Error = `API error: ${err.response.status}`;
-                }
-            } else {
-                workitemStatus.Error = err.message || 'Unknown error';
+            } else if (err.body) {
+                errorDetail = JSON.stringify(err.body);
+            } else if (err.message) {
+                errorDetail = err.message;
             }
             
             workitemStatus.Status = 'Failed';
+            workitemStatus.Error = `API Error: ${errorDetail}`;
             global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
         } finally {
-            // Remove the workitem after it's done
             workitemList.splice(index, 1);
         }
     } else {
-        // Report if Design Automation job was not successful
         workitemStatus.Status = 'Failed';
         workitemStatus.Error = 'Design Automation process failed';
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+
         console.log('Design Automation error:', req.body);
     }
     return;
 });
-
 
 module.exports = router;
