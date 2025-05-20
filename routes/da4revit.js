@@ -20,10 +20,7 @@ const express = require('express');
 const config = require('../config');
 const request = require("request");
 
-const {
-    ItemsApi,
-    VersionsApi,
-} = require('forge-apis');
+const { ItemsApi, VersionsApi, FoldersApi } = require('forge-apis');
 
 const { OAuth } = require('./common/oauthImp');
 
@@ -364,6 +361,9 @@ router.get('/da4revit/v1/upgrader/files/:file_workitem_id', async(req, res, next
 /// Handles the callback from Design Automation after job completion
 ///////////////////////////////////////////////////////////////////////
 // Fix for the callback handler in da4revit.js
+///////////////////////////////////////////////////////////////////////
+/// Handles the callback from Design Automation after job completion
+///////////////////////////////////////////////////////////////////////
 router.post('/callback/designautomation', async (req, res, next) => {
     // Best practice is to acknowledge receipt immediately
     res.status(202).end();
@@ -387,8 +387,12 @@ router.post('/callback/designautomation', async (req, res, next) => {
         let index = workitemList.indexOf(workitem);
         workitemStatus.Status = 'Success';
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-        console.log("Processing workitem: " + workitem.workitemId);
-        console.log("Is new version flag: ", workitem.isNewVersion);
+        
+        // Log workitem properties for debugging
+        console.log(`Processing workitem: ${workitem.workitemId}`);
+        console.log(`- isNewVersion: ${workitem.isNewVersion}`);
+        console.log(`- operationType: ${workitem.operationType || 'Not specified'}`);
+        console.log(`- Has token: ${Boolean(workitem.access_token_3Legged)}`);
 
         try {
             // Create a new OAuth instance and properly set up the session with token info
@@ -424,276 +428,249 @@ router.post('/callback/designautomation', async (req, res, next) => {
             }
             
             console.log("Valid token obtained, proceeding with API calls");
+            const oauth_client = oauth.getClient();
             
-            // Extract project ID first (common to both cases)
-            const projectId = workitem.projectId;
-            if (!projectId) {
-                throw new Error("Missing project ID in workitem");
-            }
-            
-            // Initialize variables we'll extract from the workitem
-            let fileItemId = null;
-            let storageId = null;
-            let fileName = null;
-            let versionType = null;
-            
-            // Log the actual workitem data structure for debugging
-            console.log("Workitem createVersionData structure:", 
-                        JSON.stringify(workitem.createVersionData, null, 2));
-            
-            // Extract data differently based on whether this is a new version or new item
-            if (workitem.isNewVersion === true) {
-                console.log("Processing as new version");
-                
-                // For new version: get data from version relationships
-                if (workitem.createVersionData && 
-                    workitem.createVersionData.data && 
-                    workitem.createVersionData.data.relationships) {
-                    
-                    // Get item ID
-                    if (workitem.createVersionData.data.relationships.item && 
-                        workitem.createVersionData.data.relationships.item.data) {
-                        fileItemId = workitem.createVersionData.data.relationships.item.data.id;
-                    }
-                    
-                    // Get storage ID
-                    if (workitem.createVersionData.data.relationships.storage && 
-                        workitem.createVersionData.data.relationships.storage.data) {
-                        storageId = workitem.createVersionData.data.relationships.storage.data.id;
-                    }
-                }
-                
-                // Get filename and version type
-                if (workitem.createVersionData && 
-                    workitem.createVersionData.data && 
-                    workitem.createVersionData.data.attributes) {
-                    
-                    fileName = workitem.createVersionData.data.attributes.name;
-                    
-                    if (workitem.createVersionData.data.attributes.extension) {
-                        versionType = workitem.createVersionData.data.attributes.extension.type;
-                    }
-                }
-            } else {
-                console.log("Processing as new item");
-                
-                // For new item: most data comes from the 'included' array (first version)
-                if (workitem.createVersionData && 
-                    workitem.createVersionData.included && 
-                    workitem.createVersionData.included.length > 0) {
-                    
-                    const firstVersion = workitem.createVersionData.included[0];
-                    
-                    // Get storage ID from included version
-                    if (firstVersion.relationships && 
-                        firstVersion.relationships.storage && 
-                        firstVersion.relationships.storage.data) {
-                        storageId = firstVersion.relationships.storage.data.id;
-                    }
-                    
-                    // Get filename and version type from included version
-                    if (firstVersion.attributes) {
-                        fileName = firstVersion.attributes.name;
-                        
-                        if (firstVersion.attributes.extension) {
-                            versionType = firstVersion.attributes.extension.type;
-                        }
-                    }
-                }
-                
-                // For a new item, the parent folder ID is important
-                if (workitem.createVersionData && 
-                    workitem.createVersionData.data && 
-                    workitem.createVersionData.data.relationships &&
-                    workitem.createVersionData.data.relationships.parent &&
-                    workitem.createVersionData.data.relationships.parent.data) {
-                    
-                    // Store folder ID (not used directly for API call but useful for logging)
-                    const folderId = workitem.createVersionData.data.relationships.parent.data.id;
-                    console.log("Parent folder ID:", folderId);
-                }
-            }
-            
-            // Log the extracted data for debugging
-            console.log("Extracted data from workitem:");
-            console.log("- Project ID:", projectId);
-            console.log("- File Item ID:", fileItemId);
-            console.log("- Storage ID:", storageId);
-            console.log("- File Name:", fileName);
-            console.log("- Version Type:", versionType);
-            
-            // Verify we have the minimum required data
-            if (!projectId || !storageId || !fileName) {
-                throw new Error(`Missing required data from workitem: projectId=${projectId}, storageId=${storageId}, fileName=${fileName}`);
-            }
-            
-            // For version creation, we must have an item ID
-            if (workitem.isNewVersion === true && !fileItemId) {
-                throw new Error("Missing item ID required for version creation");
-            }
-            
-            // Process using the direct API approach
+            // Get the file info from BIM360 to determine if it's a new or existing file
             let version = null;
             
             try {
-                console.log(`Creating ${workitem.isNewVersion ? 'new version' : 'new item'} with direct API`);
+                // Import required APIs if not already at the top of the file
+                const { ItemsApi, VersionsApi, FoldersApi } = require('forge-apis');
                 
-                // Choose endpoint based on operation type
-                const apiEndpoint = workitem.isNewVersion === true 
-                    ? `https://developer.api.autodesk.com/data/v1/projects/${projectId}/versions`
-                    : `https://developer.api.autodesk.com/data/v1/projects/${projectId}/items`;
+                // Determine if this is a version operation
+                const isVersionOperation = workitem.isNewVersion || 
+                    (workitem.createVersionData && 
+                     workitem.createVersionData.data &&
+                     workitem.createVersionData.data.type === 'versions');
                 
-                console.log("Using API endpoint:", apiEndpoint);
-                
-                // Create API request body based on operation type
-                const requestBody = workitem.isNewVersion === true
-                    ? {
-                        "jsonapi": { "version": "1.0" },
-                        "data": {
-                            "type": "versions",
-                            "attributes": {
-                                "name": fileName,
-                                "extension": {
-                                    "type": versionType,
-                                    "version": "1.0"
-                                }
-                            },
-                            "relationships": {
-                                "item": {
-                                    "data": {
-                                        "type": "items",
-                                        "id": fileItemId
-                                    }
-                                },
-                                "storage": {
-                                    "data": {
-                                        "type": "objects",
-                                        "id": storageId
-                                    }
-                                }
-                            }
-                        }
+                if (isVersionOperation) {
+                    console.log("Processing as a VERSION operation");
+                    const versions = new VersionsApi();
+                    
+                    // Ensure the type is set correctly
+                    if (workitem.createVersionData.data.type !== 'versions') {
+                        console.log("Correcting data type to 'versions'");
+                        workitem.createVersionData.data.type = 'versions';
                     }
-                    : workitem.createVersionData; // For new items, use the original payload
-                
-                // Log the request body for debugging
-                console.log("API request body:", JSON.stringify(requestBody, null, 2));
-                
-                // Create request options
-                const options = {
-                    method: 'POST',
-                    url: apiEndpoint,
-                    headers: {
-                        'Content-Type': 'application/vnd.api+json',
-                        'Authorization': `Bearer ${credentials.access_token}`
-                    },
-                    body: JSON.stringify(requestBody)
-                };
-                
-                // Make the request using the request library
-                version = await new Promise((resolve, reject) => {
-                    request(options, (error, response, body) => {
-                        if (error) {
-                            reject(error);
-                            return;
+                    
+                    version = await versions.postVersion(
+                        workitem.projectId,
+                        workitem.createVersionData,
+                        oauth_client,
+                        credentials
+                    );
+                    
+                    console.log('Successfully created new version of the file');
+                } else {
+                    // Try to find if the file already exists in the folder
+                    if (workitem.createVersionData && workitem.createVersionData.data) {
+                        let fileName = '';
+                        
+                        // Extract file name from either versions or items structure
+                        if (workitem.createVersionData.data.attributes) {
+                            fileName = workitem.createVersionData.data.attributes.name;
+                        } else if (workitem.createVersionData.included && 
+                                   workitem.createVersionData.included.length > 0 &&
+                                   workitem.createVersionData.included[0].attributes) {
+                            fileName = workitem.createVersionData.included[0].attributes.name;
                         }
                         
-                        console.log('Direct API response status:', response.statusCode);
+                        console.log(`Looking for existing file: ${fileName}`);
                         
-                        let responseData;
-                        try {
-                            responseData = JSON.parse(body);
-                            console.log('Response body:', JSON.stringify(responseData, null, 2));
-                        } catch (e) {
-                            console.log('Response is not JSON:', body);
-                            responseData = body;
+                        // Find the folder ID
+                        let folderId = '';
+                        if (workitem.createVersionData.data.relationships &&
+                            workitem.createVersionData.data.relationships.parent &&
+                            workitem.createVersionData.data.relationships.parent.data) {
+                            folderId = workitem.createVersionData.data.relationships.parent.data.id;
                         }
                         
-                        if (response.statusCode >= 400) {
-                            // If we get a conflict, try with a timestamp
-                            if (response.statusCode === 409) {
-                                console.log('Conflict detected, trying with timestamp...');
-                                const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
-                                const fileNameParts = fileName.split('.');
-                                const extension = fileNameParts.pop();
-                                const baseName = fileNameParts.join('.');
-                                const newName = `${baseName}_${timestamp}.${extension}`;
+                        console.log(`Folder ID: ${folderId}`);
+                        
+                        // If we have folder ID, try to find the file
+                        if (folderId) {
+                            // FIXED: Use FoldersApi instead of ItemsApi for folder operations
+                            const folders = new FoldersApi();
+                            
+                            try {
+                                const folderContents = await folders.getFolderContents(
+                                    workitem.projectId, 
+                                    folderId, 
+                                    {}, 
+                                    oauth_client, 
+                                    credentials
+                                );
                                 
-                                // Update options with new name
-                                const updatedOptions = { ...options };
-                                const updatedBody = JSON.parse(updatedOptions.body);
+                                // Look for a file with matching name
+                                const existingFile = folderContents.body.data.find(item => 
+                                    (item.attributes.displayName === fileName || item.attributes.name === fileName) && 
+                                    item.type === 'items'
+                                );
                                 
-                                // Update the name in the appropriate place based on operation type
-                                if (workitem.isNewVersion === true) {
-                                    updatedBody.data.attributes.name = newName;
-                                } else {
-                                    // For new item, update both main data and included version
-                                    updatedBody.data.attributes.name = newName;
-                                    if (updatedBody.included && updatedBody.included.length > 0) {
-                                        updatedBody.included[0].attributes.name = newName;
-                                    }
-                                }
-                                
-                                updatedOptions.body = JSON.stringify(updatedBody);
-                                
-                                console.log('Retrying with name:', newName);
-                                
-                                // Try again with timestamp
-                                request(updatedOptions, (err2, resp2, body2) => {
-                                    if (err2) {
-                                        reject(err2);
-                                        return;
+                                if (existingFile) {
+                                    // Found existing file - create a version instead of a new item
+                                    console.log(`Found existing file: ${existingFile.id}, creating version instead of new item`);
+                                    
+                                    // Get storage ID from the workitem
+                                    let storageId = '';
+                                    if (workitem.createVersionData.included && 
+                                        workitem.createVersionData.included.length > 0 &&
+                                        workitem.createVersionData.included[0].relationships &&
+                                        workitem.createVersionData.included[0].relationships.storage &&
+                                        workitem.createVersionData.included[0].relationships.storage.data) {
+                                        storageId = workitem.createVersionData.included[0].relationships.storage.data.id;
                                     }
                                     
-                                    console.log('Retry status:', resp2.statusCode);
+                                    console.log(`Storage ID: ${storageId}`);
                                     
-                                    if (resp2.statusCode >= 400) {
-                                        reject({
-                                            statusCode: resp2.statusCode,
-                                            body: body2
-                                        });
-                                    } else {
-                                        try {
-                                            const data = JSON.parse(body2);
-                                            resolve({
-                                                statusCode: resp2.statusCode,
-                                                body: data
-                                            });
-                                        } catch (e) {
-                                            resolve({
-                                                statusCode: resp2.statusCode,
-                                                body: body2
-                                            });
+                                    // Create version payload
+                                    const versionPayload = {
+                                        "jsonapi": {
+                                            "version": "1.0"
+                                        },
+                                        "data": {
+                                            "type": "versions",
+                                            "attributes": {
+                                                "name": fileName,
+                                                "extension": {
+                                                    "type": "versions:autodesk.bim360:File",
+                                                    "version": "1.0"
+                                                }
+                                            },
+                                            "relationships": {
+                                                "item": {
+                                                    "data": {
+                                                        "type": "items",
+                                                        "id": existingFile.id
+                                                    }
+                                                },
+                                                "storage": {
+                                                    "data": {
+                                                        "type": "objects",
+                                                        "id": storageId
+                                                    }
+                                                }
+                                            }
                                         }
-                                    }
-                                });
-                            } else {
-                                reject({
-                                    statusCode: response.statusCode,
-                                    body: responseData
-                                });
+                                    };
+                                    
+                                    // Use the versions API to create a new version
+                                    const versions = new VersionsApi();
+                                    version = await versions.postVersion(
+                                        workitem.projectId,
+                                        versionPayload,
+                                        oauth_client,
+                                        credentials
+                                    );
+                                    
+                                    console.log('Successfully created new version of existing file');
+                                } else {
+                                    // No existing file found, proceed with standard item creation
+                                    console.log('No existing file found, creating new item');
+                                    const items = new ItemsApi();
+                                    version = await items.postItem(
+                                        workitem.projectId,
+                                        workitem.createVersionData,
+                                        oauth_client,
+                                        credentials
+                                    );
+                                }
+                            } catch (folderErr) {
+                                console.log('Error getting folder contents:', folderErr);
+                                throw new Error(`Failed to get folder contents: ${folderErr.message}`);
                             }
                         } else {
-                            resolve({
-                                statusCode: response.statusCode,
-                                body: responseData
-                            });
+                            // No folder ID, fall back to regular item creation
+                            console.log('No folder ID found, creating new item');
+                            const items = new ItemsApi();
+                            version = await items.postItem(
+                                workitem.projectId,
+                                workitem.createVersionData,
+                                oauth_client,
+                                credentials
+                            );
                         }
-                    });
-                });
-                
-                console.log(`Successfully created ${workitem.isNewVersion ? 'new version' : 'new item'}!`);
-            } catch (err) {
-                console.log("Direct API failed:", err);
-                throw err;
+                    } else {
+                        // No version data, fall back to regular item creation
+                        console.log('No version data found, creating new item');
+                        const items = new ItemsApi();
+                        version = await items.postItem(
+                            workitem.projectId,
+                            workitem.createVersionData,
+                            oauth_client,
+                            credentials
+                        );
+                    }
+                }
+            } catch (apiErr) {
+                // If we get a 409 conflict, the file already exists - try to create a version with timestamp
+                if (apiErr.statusCode === 409) {
+                    console.log('Conflict error - file already exists');
+                    
+                    // Add timestamp to filename
+                    const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+                    let fileName = '';
+                    
+                    // Extract and modify name
+                    if (workitem.createVersionData.data.attributes) {
+                        fileName = workitem.createVersionData.data.attributes.name;
+                    } else if (workitem.createVersionData.included && 
+                              workitem.createVersionData.included.length > 0 &&
+                              workitem.createVersionData.included[0].attributes) {
+                        fileName = workitem.createVersionData.included[0].attributes.name;
+                    }
+                    
+                    const fileNameParts = fileName.split('.');
+                    const extension = fileNameParts.pop();
+                    const baseName = fileNameParts.join('.');
+                    const newName = `${baseName}_${timestamp}.${extension}`;
+                    
+                    console.log(`Trying with timestamped name: ${newName}`);
+                    
+                    // Create a modified copy of the creation data
+                    const modifiedData = JSON.parse(JSON.stringify(workitem.createVersionData));
+                    
+                    // Determine if this is a version or item operation
+                    if (workitem.isNewVersion || modifiedData.data.type === 'versions') {
+                        // Update version name
+                        modifiedData.data.attributes.name = newName;
+                        
+                        // Create version
+                        const versions = new VersionsApi();
+                        version = await versions.postVersion(
+                            workitem.projectId,
+                            modifiedData,
+                            oauth_client,
+                            credentials
+                        );
+                    } else {
+                        // Update both main data and included version name
+                        modifiedData.data.attributes.name = newName;
+                        if (modifiedData.included && modifiedData.included.length > 0) {
+                            modifiedData.included[0].attributes.name = newName;
+                        }
+                        
+                        // Create item
+                        const items = new ItemsApi();
+                        version = await items.postItem(
+                            workitem.projectId,
+                            modifiedData,
+                            oauth_client,
+                            credentials
+                        );
+                    }
+                } else {
+                    // For other errors, pass them along
+                    throw apiErr;
+                }
             }
             
             if (version === null || (version.statusCode !== 201 && version.statusCode !== 200)) {
-                console.log(`Failed to create ${workitem.isNewVersion ? 'new version' : 'new item'}`);
+                console.log('Failed to create a new version/item of the file');
                 workitemStatus.Status = 'Failed';
                 workitemStatus.Error = 'BIM360/ACC API call failed';
             } else {
-                console.log(`Successfully created ${workitem.isNewVersion ? 'new version' : 'new item'}`);
+                console.log('Successfully created a new version/item of the file');
                 workitemStatus.Status = 'Completed';
             }
             
@@ -701,35 +678,25 @@ router.post('/callback/designautomation', async (req, res, next) => {
         } catch (err) {
             console.log('Error details:', err);
             
-            let errorDetail = 'Unknown error';
+            // Simple error handling
+            let errorDetail = err.message || 'Unknown error';
             
-            if (err.statusCode) {
-                errorDetail = `Status ${err.statusCode}: ${err.statusMessage || 'Unknown error'}`;
-            }
-            
-            if (err.response) {
-                console.log('Response status:', err.response.status);
-                if (err.response.data) {
-                    console.log('Response data:', JSON.stringify(err.response.data, null, 2));
-                    errorDetail = JSON.stringify(err.response.data);
-                }
-            } else if (err.body) {
-                errorDetail = JSON.stringify(err.body);
-            } else if (err.message) {
-                errorDetail = err.message;
+            if (err.response && err.response.data) {
+                errorDetail = JSON.stringify(err.response.data);
             }
             
             workitemStatus.Status = 'Failed';
             workitemStatus.Error = `API Error: ${errorDetail}`;
             global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
         } finally {
+            // Remove the workitem after it's done
             workitemList.splice(index, 1);
         }
     } else {
+        // Report if Design Automation job was not successful
         workitemStatus.Status = 'Failed';
         workitemStatus.Error = 'Design Automation process failed';
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-
         console.log('Design Automation error:', req.body);
     }
     return;
