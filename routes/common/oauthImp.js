@@ -51,14 +51,20 @@ class OAuth {
     }
 
     async getInternalToken() {
-    if (this._isExpired() || this._expiresIn() < 600) { 
-        console.log("Token expiring soon or expired, refreshing...");
-        if (!await this._refreshTokens()) {
-            console.log("Token refresh failed");
-            return null;
+        if (this._isExpired() || this._expiresIn() < 600) { 
+            console.log("Token expiring soon or expired, refreshing...");
+            
+            if (!this._session.refresh_token) {
+                console.log("No refresh token present, cannot refresh");
+                return null;
+            }
+            
+            if (!await this._refreshTokens()) {
+                console.log("Token refresh failed");
+                return null;
+            }
+            console.log("Token refreshed successfully");
         }
-        console.log("Token refreshed successfully");
-    }
 
         return {
             access_token: this._session.internal_token,
