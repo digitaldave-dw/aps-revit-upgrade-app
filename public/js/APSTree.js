@@ -16,6 +16,11 @@
 // UNINTERRUPTED OR ERROR FREE.
 /////////////////////////////////////////////////////////////////////
 
+/////////////////////////////////////////////////////////////////////
+// Enhanced APSTree.js with Bulk Processing Support
+// Copyright (c) Autodesk, Inc. All rights reserved
+/////////////////////////////////////////////////////////////////////
+
 $(document).ready(function () {
   // first, check if current visitor is signed in
   jQuery.ajax({
@@ -75,6 +80,7 @@ $(document).ready(function () {
     });
   });  
 
+  // Enhanced upgrade button with bulk processing support
   $('#upgradeBtn').click(async function () {
     let sourceNode = $('#sourceHubs').jstree(true).get_selected(true)[0];
     if(sourceNode === null){
@@ -92,15 +98,19 @@ $(document).ready(function () {
       return;
     }
 
-    // TBD: use the current selection of version & action
+    // Get upgrade settings
     bUpgrade2023 =  $('input[name="upgradeToVersion"]:checked').val() === '2023';
+    const targetVersion = $('input[name="upgradeToVersion"]:checked').val();
     bIgnore      =  $('input[name="fileExisted"]:checked').val() === 'skip';
 
     bSupportRvt = $('#supportRvtCbx')[0].checked;
     bSupportRfa = $('#supportRfaCbx')[0].checked;
     bSupportRte = $('#supportRteCbx')[0].checked;
 
-    // remove items if any.
+    // Get bulk processing preference
+    const useBulkProcessing = $('#bulkProcessingCbx')[0].checked;
+
+    // Clear previous logs
     let logList = document.getElementById('logStatus');
     let index = logList.childElementCount;
     while(index > 0){
@@ -111,11 +121,31 @@ $(document).ready(function () {
     // Disable the upgrade button    
     let upgradeBtnElm = document.getElementById('upgradeBtn');
     upgradeBtnElm.disabled = true;
-        
-    document.getElementById('upgradeTitle').innerHTML ="<h4>Start upgrading Revit files(Limitation: 5 Files Maximun)...</h4>";
-    fileNumber = 0;
-    await upgradeFolder(sourceNode, destinatedNode);
-    document.getElementById('upgradeTitle').innerHTML ="<h4>Creating versions in BIM360(Limitation: 5 Files Maximun)...</h4>";
+
+    if (useBulkProcessing) {
+      // Use new bulk processing approach
+      document.getElementById('upgradeTitle').innerHTML = "<h4>🚀 Starting Bulk Processing (No File Limit)...</h4>";
+      await startBulkProcessing(sourceNode, destinatedNode, targetVersion);
+    } else {
+      // Use original approach with 5-file limitation
+      document.getElementById('upgradeTitle').innerHTML = "<h4>Start upgrading Revit files (Limited to 5 files)...</h4>";
+      fileNumber = 0;
+      await upgradeFolder(sourceNode, destinatedNode);
+      document.getElementById('upgradeTitle').innerHTML = "<h4>Creating versions in BIM360...</h4>";
+    }
+  });
+
+  // Add bulk processing toggle handler
+  $('#bulkProcessingCbx').change(function() {
+    const isChecked = this.checked;
+    const limitationText = document.getElementById('limitationText');
+    if (limitationText) {
+      if (isChecked) {
+        limitationText.innerHTML = '<span style="color: green;">✓ Bulk Processing Enabled - No File Limit</span>';
+      } else {
+        limitationText.innerHTML = '<span style="color: orange;">⚠️ Legacy Mode - 5 File Limit</span>';
+      }
+    }
   });
 });
 
@@ -125,8 +155,14 @@ var bSupportRte = true;
 var bIgnore     = true;
 var bUpgrade2023= true;
 
-const FileLimitation = 5;
+// Remove hardcoded file limitation for bulk processing
+const FileLimitation = 5; // Keep for legacy mode
 var fileNumber = 0;
+
+// Enhanced bulk processing variables
+var currentBatchId = null;
+var bulkProcessingActive = false;
+var bulkProgressInterval = null;
 
 const ItemType = {
   FILE : 1,
@@ -140,9 +176,12 @@ var workitemList    = new Array();
 var destinatedNode  = null;
 var sourceNode      = null;
 
-const SOCKET_TOPIC_WORKITEM          = 'Workitem-Notification';
+const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
+const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
 
 socketio = io();
+
+// Enhanced socket handling for both individual and bulk processing
 socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
   console.log(data);
   updateListItem(data.WorkitemId, data.Status);
@@ -150,10 +189,10 @@ socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
     workitemList.pop(data.WorkitemId);
   }
   // Mark as finished when the workitemList is empty
-  if(workitemList.length === 0){
+  if(workitemList.length === 0 && !bulkProcessingActive){
     let upgradeBtnElm = document.getElementById('upgradeBtn');
     upgradeBtnElm.disabled = false;
-    document.getElementById('upgradeTitle').innerHTML ="<h4>Upgrade Fully Completed!</h4>";
+    document.getElementById('upgradeTitle').innerHTML = "<h4>✅ Upgrade Fully Completed!</h4>";
 
     // refresh the selected node
     if(sourceNode !== null){
@@ -167,8 +206,218 @@ socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
       destinatedNode = null;
     }
  }
-})
+});
 
+// New socket handler for bulk processing progress
+socketio.on(SOCKET_TOPIC_BULK_PROGRESS, (data) => {
+  console.log('Bulk progress update:', data);
+  updateBulkProgress(data);
+});
+
+// New bulk processing function
+async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
+  try {
+    bulkProcessingActive = true;
+    
+    // Extract folder and project IDs from the destination node
+    const destinationParams = destinationNode.id.split('/');
+    const folderId = destinationParams[destinationParams.length - 1];
+    const projectId = destinationParams[destinationParams.length - 3];
+
+    // Create file filter based on supported file types
+    const supportedTypes = [];
+    if (bSupportRvt) supportedTypes.push('rvt');
+    if (bSupportRfa) supportedTypes.push('rfa');
+    if (bSupportRte) supportedTypes.push('rte');
+
+    console.log('Starting bulk processing:', {
+      projectId: projectId,
+      folderId: folderId,
+      targetVersion: targetVersion,
+      supportedTypes: supportedTypes
+    });
+
+    // Start bulk processing - FIXED payload structure
+    const response = await jQuery.ajax({
+      url: '/api/aps/da4revit/v1/upgrader/bulk',
+      method: 'POST',
+      contentType: 'application/json',
+      dataType: 'json',
+      data: JSON.stringify({
+        projectId: projectId,
+        folderId: folderId,
+        targetVersion: targetVersion,
+        supportedTypes: supportedTypes  // This matches backend expectation
+      })
+    });
+
+    if (response.success) {
+      currentBatchId = response.batchId;
+      addGroupListItem(`Bulk Processing Started`, `Processing ${response.totalFiles} files`, ItemType.FOLDER, 'list-group-item-info', currentBatchId);
+      
+      // Start progress monitoring
+      startBulkProgressMonitoring();
+      
+      document.getElementById('upgradeTitle').innerHTML = `<h4>🔄 Processing ${response.totalFiles} files...</h4>`;
+    } else {
+      throw new Error(response.error || 'Failed to start bulk processing');
+    }
+
+  } catch (error) {
+    console.error('Bulk processing error:', error);
+    
+    // Enhanced error reporting
+    let errorMessage = 'Unknown error';
+    if (error.responseJSON && error.responseJSON.error) {
+      errorMessage = error.responseJSON.error;
+    } else if (error.message) {
+      errorMessage = error.message;
+    } else if (error.statusText) {
+      errorMessage = error.statusText;
+    }
+    
+    addGroupListItem('Bulk Processing', 'Failed: ' + errorMessage, ItemType.FOLDER, 'list-group-item-danger');
+    
+    let upgradeBtnElm = document.getElementById('upgradeBtn');
+    upgradeBtnElm.disabled = false;
+    bulkProcessingActive = false;
+    document.getElementById('upgradeTitle').innerHTML = "<h4>❌ Bulk Processing Failed</h4>";
+  }
+}
+
+// Monitor bulk processing progress
+function startBulkProgressMonitoring() {
+  if (bulkProgressInterval) {
+    clearInterval(bulkProgressInterval);
+  }
+  
+  bulkProgressInterval = setInterval(async () => {
+    if (!currentBatchId) return;
+    
+    try {
+      const status = await jQuery.ajax({
+        url: `/api/aps/da4revit/v1/upgrader/bulk/${currentBatchId}/status`,
+        method: 'GET',
+        dataType: 'json'
+      });
+      
+      updateBulkProgress(status);
+      
+      // Check if processing is complete
+      if (status.status === 'completed' || 
+          (status.completedFiles + status.failedFiles >= status.totalFiles)) {
+        stopBulkProgressMonitoring();
+        finishBulkProcessing(status);
+      }
+      
+    } catch (error) {
+      console.error('Error getting bulk status:', error);
+    }
+  }, 3000); // Poll every 3 seconds
+}
+
+// Stop bulk progress monitoring
+function stopBulkProgressMonitoring() {
+  if (bulkProgressInterval) {
+    clearInterval(bulkProgressInterval);
+    bulkProgressInterval = null;
+  }
+}
+
+// Update bulk processing progress in UI
+function updateBulkProgress(data) {
+  const titleElement = document.getElementById('upgradeTitle');
+  const progressPercent = data.totalFiles > 0 ? Math.round((data.completedFiles / data.totalFiles) * 100) : 0;
+  
+  titleElement.innerHTML = `
+    <h4>📊 Bulk Processing Progress: ${data.completedFiles}/${data.totalFiles} (${progressPercent}%)</h4>
+    <div class="progress" style="margin: 10px 0;">
+      <div class="progress-bar progress-bar-success" role="progressbar" style="width: ${progressPercent}%">
+        ${progressPercent}%
+      </div>
+    </div>
+    <small>
+      ✅ Completed: ${data.completedFiles} | 
+      🔄 Processing: ${data.processingFiles || 0} | 
+      ⏳ Queued: ${data.queuedFiles || 0} | 
+      ❌ Failed: ${data.failedFiles || 0}
+    </small>
+  `;
+
+  // Update individual file statuses if available
+  if (data.files && data.files.length > 0) {
+    updateBulkFileList(data.files);
+  }
+}
+
+// Update bulk file list in UI
+function updateBulkFileList(files) {
+  // Clear existing file entries (keep the bulk processing entry)
+  const logList = document.getElementById('logStatus');
+  const entries = Array.from(logList.children);
+  
+  // Remove individual file entries but keep folder entries
+  entries.forEach(entry => {
+    if (entry.textContent.includes('File:') && !entry.textContent.includes('Bulk Processing')) {
+      entry.remove();
+    }
+  });
+
+  // Add current file statuses
+  files.slice(0, 10).forEach(file => { // Show only first 10 files to avoid UI clutter
+    const statusClass = getStatusClass(file.status);
+    addGroupListItem(file.name, file.status.toUpperCase(), ItemType.FILE, statusClass, file.workItemId);
+  });
+
+  // Add summary if more than 10 files
+  if (files.length > 10) {
+    addGroupListItem(`... and ${files.length - 10} more files`, 'Processing', ItemType.FOLDER, 'list-group-item-info');
+  }
+}
+
+// Get CSS class for file status
+function getStatusClass(status) {
+  switch (status.toLowerCase()) {
+    case 'completed': return 'list-group-item-success';
+    case 'failed': return 'list-group-item-danger';
+    case 'processing': return 'list-group-item-info';
+    case 'queued': return 'list-group-item-warning';
+    default: return 'list-group-item-default';
+  }
+}
+
+// Finish bulk processing
+function finishBulkProcessing(finalStatus) {
+  bulkProcessingActive = false;
+  currentBatchId = null;
+  
+  let upgradeBtnElm = document.getElementById('upgradeBtn');
+  upgradeBtnElm.disabled = false;
+  
+  const successCount = finalStatus.completedFiles || 0;
+  const failedCount = finalStatus.failedFiles || 0;
+  const totalCount = finalStatus.totalFiles || 0;
+  
+  if (failedCount === 0) {
+    document.getElementById('upgradeTitle').innerHTML = `<h4>🎉 Bulk Processing Completed Successfully! (${successCount}/${totalCount} files)</h4>`;
+  } else {
+    document.getElementById('upgradeTitle').innerHTML = `<h4>⚠️ Bulk Processing Completed with ${failedCount} failures (${successCount}/${totalCount} files)</h4>`;
+  }
+
+  // Refresh tree nodes
+  if(sourceNode !== null){
+    let instance = $('#sourceHubs').jstree(true);
+    instance.refresh_node(sourceNode);
+    sourceNode = null;
+  }
+  if(destinatedNode !== null ){
+    let instance = $('#destinationHubs').jstree(true);
+    instance.refresh_node(destinatedNode);
+    destinatedNode = null;
+  }
+}
+
+// Original folder upgrade function (kept for legacy mode)
 async function upgradeFolder(sourceNode, destinationNode) {
   if (sourceNode === null || sourceNode.type !== 'folders')
     return false;
@@ -205,6 +454,7 @@ async function upgradeFolder(sourceNode, destinationNode) {
           (bSupportRfa && fileExtension === 'rfa') ||
           (bSupportRte && fileExtension === 'rte')) {
           if (fileNumber++ >= FileLimitation) {
+            addGroupListItem('File Limit Reached', `Only ${FileLimitation} files processed. Enable Bulk Processing for unlimited files.`, ItemType.FOLDER, 'list-group-item-warning');
             return;
           }
           try {
@@ -221,7 +471,34 @@ async function upgradeFolder(sourceNode, destinationNode) {
   }, true);
 };
 
+// Cancel bulk processing function
+async function cancelBulkProcessing() {
+  if (!currentBatchId) return;
+  
+  try {
+    await jQuery.ajax({
+      url: `/api/aps/da4revit/v1/upgrader/bulk/${currentBatchId}`,
+      method: 'DELETE',
+      dataType: 'json'
+    });
+    
+    stopBulkProgressMonitoring();
+    bulkProcessingActive = false;
+    currentBatchId = null;
+    
+    let upgradeBtnElm = document.getElementById('upgradeBtn');
+    upgradeBtnElm.disabled = false;
+    
+    document.getElementById('upgradeTitle').innerHTML = "<h4>🛑 Bulk Processing Cancelled</h4>";
+    addGroupListItem('Bulk Processing', 'Cancelled by user', ItemType.FOLDER, 'list-group-item-warning');
+    
+  } catch (error) {
+    console.error('Error cancelling bulk processing:', error);
+    addGroupListItem('Cancel Operation', 'Failed: ' + error.message, ItemType.FOLDER, 'list-group-item-danger');
+  }
+}
 
+// Rest of the original functions remain unchanged...
 function upgradeFileToFolder(sourceFile, destinateFolder){  
   let def = $.Deferred();
 
@@ -229,7 +506,6 @@ function upgradeFileToFolder(sourceFile, destinateFolder){
     def.reject('input parameters are null');
     return def.promise();
   }
-  encodeURIComponent()
   
   jQuery.post({
     url: '/api/aps/da4revit/v1/upgrader/files/'+encodeURIComponent(sourceFile)+'/folders/'+encodeURIComponent(destinateFolder),
@@ -305,11 +581,10 @@ function prepareUserHubsTree( userHubs) {
     },
     "plugins": ["types", "state", "sort", "contextmenu"],
     contextmenu: { items: (userHubs === '#sourceHubs'? autodeskCustomMenuSource: autodeskCustomMenuDestination)},
-    "state": { "key": userHubs }// key restore tree state
+    "state": { "key": userHubs }
   }).bind("activate_node.jstree", function (evt, data) {
   });
 }
-
 
 function autodeskCustomMenuSource(autodeskNode) {
   var items;
@@ -347,7 +622,6 @@ function autodeskCustomMenuSource(autodeskNode) {
   return items;
 }
 
-
 function autodeskCustomMenuDestination(autodeskNode) {
   var items;
 
@@ -366,12 +640,10 @@ function autodeskCustomMenuDestination(autodeskNode) {
           action: async function () {
             try{
               await deleteFolder(autodeskNode);
-              // refresh the parent node
               let instance = $('#destinationHubs').jstree(true);
               selectNode = instance.get_selected(true)[0];
               parentNode = instance.get_parent(selectNode);
               instance.refresh_node(parentNode);
-
             }catch(err){
               alert("Failed to delete folder: " + autodeskNode.text )
             }
@@ -384,7 +656,6 @@ function autodeskCustomMenuDestination(autodeskNode) {
 
   return items;
 }
-
 
 function deleteFolder(node){
   let def = $.Deferred();
@@ -410,7 +681,6 @@ function deleteFolder(node){
   return def.promise();
 }
 
-
 async function createFolder(node) {
   if (node === null) {
     console.log('selected node is not correct.');
@@ -427,14 +697,12 @@ async function createFolder(node) {
     alert("Failed to create folder: " + folderName )
   }
 
-  // refresh the node
   let instance = $('#destinationHubs').jstree(true);
   let selectNode = instance.get_selected(true)[0];
   instance.refresh_node(selectNode);
 }
 
 function createNamedFolder(node, folderName) {
-
   let def = $.Deferred();
 
   if (node === null || folderName === null || folderName === '') {
@@ -461,7 +729,6 @@ function createNamedFolder(node, folderName) {
   return def.promise();
 }
 
-
 function cancelWorkitem( workitemId ){
   let def = $.Deferred();
 
@@ -483,7 +750,6 @@ function cancelWorkitem( workitemId ){
   });
   return def.promise();
 }
-
 
 function getWorkitemStatus( workitemId ){
   let def = $.Deferred();
@@ -531,31 +797,49 @@ function addGroupListItem(itemText, statusStr, itemType, itemStyle, itemId) {
 
   let label = document.createElement('label');
   label.setAttribute('id', itemId + LabelIdEndfix);
+  
   switch (itemType) {
     case ItemType.FILE:
       li.textContent = 'File:' + itemText;
       label.textContent = ', workitem is:' + itemId + ', status is:' + statusStr;
       li.appendChild(label)
 
-      let spanCancel = document.createElement('span')
-      spanCancel.setAttribute('class', 'btn btn-xs btn-default')
-      spanCancel.setAttribute('id', itemId + CancelIdEndfix);
-      spanCancel.onclick = async (e) => {
-        const idParams = e.currentTarget.id.split('-')
-        try {
-          await cancelWorkitem(idParams[0]);
-        } catch (err) {
-          console.log('failed to cencel the workitem' + idParams[0]);
-        }
-      };
-  
-      spanCancel.textContent = 'Cancel';
-      li.appendChild(spanCancel)
+      // Add cancel button for individual workitems (not bulk processing)
+      if (itemId && itemId !== currentBatchId) {
+        let spanCancel = document.createElement('span')
+        spanCancel.setAttribute('class', 'btn btn-xs btn-default')
+        spanCancel.setAttribute('id', itemId + CancelIdEndfix);
+        spanCancel.onclick = async (e) => {
+          const idParams = e.currentTarget.id.split('-')
+          try {
+            await cancelWorkitem(idParams[0]);
+          } catch (err) {
+            console.log('failed to cancel the workitem' + idParams[0]);
+          }
+        };
+        spanCancel.textContent = 'Cancel';
+        li.appendChild(spanCancel)
+      }
       break;
+      
     case ItemType.FOLDER:
       li.textContent = 'Folder:' + itemText;
       label.textContent = ', status is:' + statusStr;
       li.appendChild(label)
+      
+      // Add cancel button for bulk processing
+      if (itemId === currentBatchId && bulkProcessingActive) {
+        let spanCancel = document.createElement('span')
+        spanCancel.setAttribute('class', 'btn btn-xs btn-danger')
+        spanCancel.setAttribute('id', 'bulk-cancel');
+        spanCancel.onclick = async (e) => {
+          if (confirm('Are you sure you want to cancel bulk processing?')) {
+            await cancelBulkProcessing();
+          }
+        };
+        spanCancel.textContent = 'Cancel Bulk';
+        li.appendChild(spanCancel)
+      }
       break;
   }
   $('#logStatus')[0].appendChild(li);

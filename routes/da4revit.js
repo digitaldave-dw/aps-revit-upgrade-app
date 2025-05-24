@@ -40,9 +40,278 @@ const {
 } = require('./common/da4revitImp')
 
 const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
+const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
 
 let router = express.Router();
 
+
+// Enhanced queue management system
+class BulkProcessingQueue {
+    constructor() {
+        this.queue = [];
+        this.processing = new Map(); // Track currently processing items
+        this.completed = new Map();  // Track completed items
+        this.failed = new Map();     // Track failed items
+        this.maxConcurrent = 5;      // Max concurrent workitems (adjust based on your DA limits)
+        this.batchId = 0;           // Unique identifier for bulk operations
+    }
+
+    // Add files to processing queue
+    addBulkJob(files, options) {
+        const batchId = ++this.batchId;
+        const bulkJob = {
+            batchId,
+            files: files.map((file, index) => ({
+                ...file,
+                fileIndex: index,
+                status: 'queued',
+                attempts: 0,
+                maxAttempts: 3
+            })),
+            options,
+            createdAt: new Date(),
+            totalFiles: files.length,
+            completedFiles: 0,
+            failedFiles: 0
+        };
+
+        this.queue.push(bulkJob);
+        console.log(`Added bulk job ${batchId} with ${files.length} files to queue`);
+        
+        // Start processing if not already running
+        this.processQueue();
+        
+        return batchId;
+    }
+
+    // Process the queue
+    async processQueue() {
+        if (this.queue.length === 0) return;
+
+        // Process jobs one by one
+        while (this.queue.length > 0) {
+            const currentJob = this.queue[0];
+            
+            // Send initial progress
+            this.emitProgress(currentJob);
+            
+            await this.processBulkJob(currentJob);
+            
+            // Remove completed job from queue
+            this.queue.shift();
+            
+            // Final progress update
+            this.emitProgress(currentJob, true);
+        }
+    }
+
+    // Process a single bulk job
+    async processBulkJob(bulkJob) {
+        console.log(`Processing bulk job ${bulkJob.batchId} with ${bulkJob.totalFiles} files`);
+        
+        const pendingFiles = bulkJob.files.filter(f => f.status === 'queued');
+        
+        while (pendingFiles.length > 0) {
+            // Get files we can process (up to maxConcurrent)
+            const availableSlots = this.maxConcurrent - this.processing.size;
+            if (availableSlots <= 0) {
+                // Wait for some to complete
+                await this.waitForSlot();
+                continue;
+            }
+
+            // Take files for this batch
+            const filesToProcess = pendingFiles.splice(0, Math.min(availableSlots, pendingFiles.length));
+            
+            // Start processing these files
+            const processingPromises = filesToProcess.map(file => 
+                this.processFile(file, bulkJob.options)
+                    .then(result => this.handleFileComplete(file, bulkJob, result))
+                    .catch(error => this.handleFileError(file, bulkJob, error))
+            );
+
+            // Don't wait for completion, continue processing more
+            Promise.allSettled(processingPromises);
+            
+            // Update progress
+            this.emitProgress(bulkJob);
+            
+            // Brief pause to avoid overwhelming the API
+            await this.sleep(1000);
+        }
+
+        // Wait for all files in this job to complete
+        while (bulkJob.completedFiles + bulkJob.failedFiles < bulkJob.totalFiles) {
+            await this.sleep(2000);
+            this.emitProgress(bulkJob);
+        }
+    }
+
+    // Process a single file
+    async processFile(file, options) {
+        file.status = 'processing';
+        file.attempts++;
+        
+        const processingKey = `${file.fileItemId}_${Date.now()}`;
+        this.processing.set(processingKey, file);
+
+        try {
+            console.log(`Processing file: ${file.fileItemName} (attempt ${file.attempts})`);
+            
+            // Get file information
+            const params = file.fileItemId.split('/');
+            const resourceId = params[params.length - 1];
+            const projectId = params[params.length - 3];
+
+            // Create storage and version data
+            const items = new ItemsApi();
+            const folder = await items.getItemParentFolder(projectId, resourceId, options.oauth_client, options.oauth_token);
+            
+            const storageInfo = await getNewCreatedStorageInfo(
+                projectId, 
+                folder.body.data.id, 
+                file.fileItemName, 
+                options.oauth_client, 
+                options.oauth_token
+            );
+
+            const versionInfo = await getLatestVersionInfo(projectId, resourceId, options.oauth_client, options.oauth_token);
+            const inputStorageId = versionInfo.versionStorageId;
+
+            const createVersionBody = createBodyOfPostVersion(
+                resourceId,
+                file.fileItemName, 
+                storageInfo.StorageId,
+                versionInfo.versionType,
+                options.targetVersion
+            );
+
+            // Ensure correct type for version creation
+            if (createVersionBody.data.type !== "versions") {
+                createVersionBody.data.type = "versions";
+            }
+
+            // Get file extension
+            const fileNameParts = file.fileItemName.split('.');
+            const fileExtension = fileNameParts[fileNameParts.length-1].toLowerCase();
+
+            // Submit to Design Automation
+            const upgradeRes = await upgradeFile(
+                inputStorageId, 
+                storageInfo.StorageId, 
+                projectId, 
+                createVersionBody, 
+                fileExtension, 
+                options.oauth_token, 
+                options.oauth_token_2legged,
+                true // isNewVersion = true
+            );
+
+            this.processing.delete(processingKey);
+            
+            return {
+                success: true,
+                workItemId: upgradeRes.body.id,
+                workItemStatus: upgradeRes.body.status
+            };
+
+        } catch (error) {
+            this.processing.delete(processingKey);
+            throw error;
+        }
+    }
+
+    // Handle successful file completion
+    handleFileComplete(file, bulkJob, result) {
+        file.status = 'completed';
+        file.workItemId = result.workItemId;
+        file.workItemStatus = result.workItemStatus;
+        file.completedAt = new Date();
+        
+        bulkJob.completedFiles++;
+        this.completed.set(file.fileItemId, file);
+        
+        console.log(`File completed: ${file.fileItemName} (${bulkJob.completedFiles}/${bulkJob.totalFiles})`);
+    }
+
+    // Handle file processing error
+    async handleFileError(file, bulkJob, error) {
+        console.log(`File processing error: ${file.fileItemName}`, error.message);
+        
+        if (file.attempts < file.maxAttempts) {
+            // Retry after delay
+            file.status = 'queued';
+            await this.sleep(5000); // Wait 5 seconds before retry
+            return;
+        }
+        
+        // Max attempts reached
+        file.status = 'failed';
+        file.error = error.message;
+        file.failedAt = new Date();
+        
+        bulkJob.failedFiles++;
+        this.failed.set(file.fileItemId, file);
+        
+        console.log(`File failed permanently: ${file.fileItemName}`);
+    }
+
+    // Wait for processing slot to become available
+    async waitForSlot() {
+        while (this.processing.size >= this.maxConcurrent) {
+            await this.sleep(2000);
+        }
+    }
+
+    // Emit progress updates via WebSocket
+    emitProgress(bulkJob, isComplete = false) {
+        const progress = {
+            batchId: bulkJob.batchId,
+            totalFiles: bulkJob.totalFiles,
+            completedFiles: bulkJob.completedFiles,
+            failedFiles: bulkJob.failedFiles,
+            processingFiles: this.processing.size,
+            queuedFiles: bulkJob.files.filter(f => f.status === 'queued').length,
+            isComplete,
+            files: bulkJob.files.map(f => ({
+                name: f.fileItemName,
+                status: f.status,
+                attempts: f.attempts,
+                workItemId: f.workItemId,
+                error: f.error
+            }))
+        };
+
+        if (global.MyApp && global.MyApp.SocketIo) {
+            global.MyApp.SocketIo.emit(SOCKET_TOPIC_BULK_PROGRESS, progress);
+        }
+    }
+
+    // Utility sleep function
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Get job status
+    getJobStatus(batchId) {
+        const job = this.queue.find(j => j.batchId === batchId);
+        if (!job) return null;
+
+        return {
+            batchId: job.batchId,
+            status: job.completedFiles + job.failedFiles >= job.totalFiles ? 'completed' : 'processing',
+            totalFiles: job.totalFiles,
+            completedFiles: job.completedFiles,
+            failedFiles: job.failedFiles,
+            processingFiles: job.files.filter(f => f.status === 'processing').length,
+            queuedFiles: job.files.filter(f => f.status === 'queued').length,
+            files: job.files
+        };
+    }
+}
+
+// Global queue instance
+const bulkQueue = new BulkProcessingQueue();
 
 ///////////////////////////////////////////////////////////////////////
 /// Middleware for obtaining a token for each request.
@@ -59,6 +328,145 @@ router.use(async (req, res, next) => {
     }
 });
 
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Bulk upgrade multiple files from a folder
+///////////////////////////////////////////////////////////////////////
+router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
+    const { folderId, projectId, targetVersion = "2023", supportedTypes = ['rvt', 'rfa', 'rte'] } = req.body;
+
+    if (!folderId || !projectId) {
+        return res.status(400).json({ error: 'folderId and projectId are required' });
+    }
+
+    try {
+        console.log('Starting bulk processing for:', { projectId, folderId, targetVersion, supportedTypes });
+
+        // Get folder contents
+        const folders = new FoldersApi();
+        const contents = await folders.getFolderContents(projectId, folderId, {}, req.oauth_client, req.oauth_token);
+        
+        // Filter for supported Revit files
+        const revitFiles = contents.body.data.filter(item => {
+            if (item.type !== 'items') return false;
+            
+            const fileName = item.attributes.displayName || item.attributes.name;
+            if (!fileName) return false;
+            
+            const extension = fileName.split('.').pop().toLowerCase();
+            
+            // Check if extension is in supported types
+            return supportedTypes.includes(extension);
+        });
+
+        if (revitFiles.length === 0) {
+            return res.status(404).json({ 
+                error: 'No supported Revit files found in folder',
+                supportedExtensions: supportedTypes
+            });
+        }
+
+        console.log(`Found ${revitFiles.length} Revit files for bulk processing`);
+
+        // Prepare files for queue
+        const filesToProcess = revitFiles.map(item => ({
+            fileItemId: item.links.self.href,
+            fileItemName: item.attributes.displayName || item.attributes.name,
+            projectId: projectId,
+            itemId: item.id
+        }));
+
+        // Get 2-legged token for Design Automation
+        const oauth = new OAuth(req.session);
+        const oauth_client_2legged = oauth.get2LeggedClient();
+        const oauth_token_2legged = await oauth_client_2legged.authenticate();
+
+        // Add to processing queue
+        const batchId = bulkQueue.addBulkJob(filesToProcess, {
+            targetVersion,
+            oauth_client: req.oauth_client,
+            oauth_token: req.oauth_token,
+            oauth_token_2legged
+        });
+
+        res.json({
+            success: true,
+            batchId,
+            totalFiles: filesToProcess.length,
+            message: `Started bulk processing of ${filesToProcess.length} files`,
+            files: filesToProcess.map(f => f.fileItemName)
+        });
+
+    } catch (err) {
+        console.log('Error in bulk processing:', err);
+        res.status(500).json({ 
+            error: 'Failed to start bulk processing',
+            details: err.message 
+        });
+    }
+});
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Get bulk processing status
+///////////////////////////////////////////////////////////////////////
+router.get('/da4revit/v1/upgrader/bulk/:batchId/status', async (req, res, next) => {
+    const { batchId } = req.params;
+    
+    const status = bulkQueue.getJobStatus(parseInt(batchId));
+    
+    if (!status) {
+        return res.status(404).json({ error: 'Batch job not found' });
+    }
+    
+    res.json(status);
+});
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Cancel bulk processing job
+///////////////////////////////////////////////////////////////////////
+router.delete('/da4revit/v1/upgrader/bulk/:batchId', async (req, res, next) => {
+    const { batchId } = req.params;
+    
+    try {
+        // Find and cancel the job
+        const jobIndex = bulkQueue.queue.findIndex(j => j.batchId === parseInt(batchId));
+        
+        if (jobIndex === -1) {
+            return res.status(404).json({ error: 'Batch job not found' });
+        }
+        
+        const job = bulkQueue.queue[jobIndex];
+        
+        // Cancel any active workitems for this job
+        const oauth = new OAuth(req.session);
+        const oauth_client = oauth.get2LeggedClient();
+        const oauth_token = await oauth_client.authenticate();
+        
+        const cancelPromises = job.files
+            .filter(f => f.workItemId && f.status === 'processing')
+            .map(f => cancelWorkitem(f.workItemId, oauth_token.access_token).catch(err => 
+                console.log(`Failed to cancel workitem ${f.workItemId}:`, err)
+            ));
+        
+        await Promise.allSettled(cancelPromises);
+        
+        // Remove job from queue
+        bulkQueue.queue.splice(jobIndex, 1);
+        
+        res.json({ 
+            success: true, 
+            message: `Cancelled bulk job ${batchId}`,
+            cancelledWorkitems: cancelPromises.length
+        });
+        
+    } catch (err) {
+        console.log('Error cancelling bulk job:', err);
+        res.status(500).json({ 
+            error: 'Failed to cancel bulk job',
+            details: err.message 
+        });
+    }
+});
 
 
 ///////////////////////////////////////////////////////////////////////

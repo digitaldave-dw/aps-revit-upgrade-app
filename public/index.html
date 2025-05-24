@@ -2,7 +2,7 @@
 <html>
 
 <head>
-  <title>Autodesk Revit File Upgrader Online</title>
+  <title>Autodesk Revit File Upgrader Online - Enhanced with Bulk Processing</title>
   <meta charset="utf-8" />
   <!-- Common packages: jQuery, Bootstrap, jsTree -->
   <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
@@ -17,6 +17,48 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script> 
   <script src="js/DAConfigure.js"></script>
   <script src="js/APSTree.js"></script>
+  
+  <style>
+    .bulk-processing-section {
+      background-color: #f8f9fa;
+      border: 2px dashed #007bff;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 10px 0;
+    }
+    
+    .bulk-processing-section.enabled {
+      background-color: #d4edda;
+      border-color: #28a745;
+    }
+    
+    .feature-highlight {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      text-align: center;
+    }
+    
+    .limitation-warning {
+      background-color: #fff3cd;
+      border: 1px solid #ffeaa7;
+      color: #856404;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+    
+    .bulk-enabled {
+      background-color: #d1ecf1;
+      border: 1px solid #bee5eb;
+      color: #0c5460;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+  </style>
 </head>
 
 <body>
@@ -31,7 +73,6 @@
         </li>
       </ul>
 
-
       <ul class="nav navbar-nav right col-lg-2">
         <li>
             <div style="float: right; margin-top: 15px;">
@@ -45,7 +86,7 @@
         <li>
           <div style="float: right; margin-top: 15px; cursor: pointer;">
             <span style="padding-right: 5px;" data-toggle="modal" data-target="#defineActivityModal"
-              title="Configura AppBundle & Activity">
+              title="Configure AppBundle & Activity">
               <span class="glyphicon glyphicon-cog glyphiconTop mlink"></span> Configure
             </span>
           </div>
@@ -90,10 +131,42 @@
       <div class="col-sm-6 fill">
         <div class="row">
             <div style="padding-top: 10px; text-align: center;">
-                <h2>Revit File Upgrader Online</h2>
+                <h2>🚀 Enhanced Revit File Upgrader</h2>
+                <div class="feature-highlight">
+                  <strong>✨ NEW: Bulk Processing Available!</strong><br>
+                  Process unlimited files with advanced queue management
+                </div>
             </div>
             <br />
           </div>
+          
+        <!-- Enhanced Bulk Processing Section -->
+        <div class="bulk-processing-section" id="bulkProcessingSection">
+          <div class="row">
+            <div class="col-lg-12">
+              <div class="input-group">
+                <span class="input-group-addon">
+                  <input type="checkbox" id='bulkProcessingCbx' checked=true>
+                </span>
+                <label class="form-control" style="background-color: #e3f2fd;">
+                  <strong>🔥 Enable Bulk Processing (Recommended)</strong>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 10px;">
+            <div class="col-lg-12">
+              <div id="limitationText" class="bulk-enabled">
+                <strong>✅ Bulk Processing Enabled - No File Limit</strong><br>
+                <small>• Process hundreds of files automatically<br>
+                • Advanced queue management with retry logic<br>
+                • Real-time progress tracking<br>
+                • Smart rate limiting to respect API quotas</small>
+              </div>
+            </div>
+          </div>
+        </div>
+        
         <div class="row ">
           <div style="padding-top: 10px; text-align: center;">
             <form class="bs-example bs-example-form" role="form">
@@ -107,14 +180,13 @@
                       <input type="radio" name='fileExisted' value='override'>
                     </span>
                     <label class="form-control">Override</label>
-                    <!-- <input type="text" class="form-control"> -->
-                  </div><!-- /input-group -->
+                  </div>
                   <div class="input-group">
                     <span class="input-group-addon">
                       <input type="radio" name='fileExisted' value='skip' checked>
                     </span>
                     <label class="form-control">Skip</label>
-                  </div><!-- /input-group -->
+                  </div>
                 </div>
                 <div class="col-lg-6">
                     <div style="text-align: left;">
@@ -125,13 +197,13 @@
                         <input type="radio" name='upgradeToVersion' value='2023' checked>
                       </span>
                       <label class="form-control">Revit 2023</label>
-                    </div><!-- /input-group -->
+                    </div>
                     <div class="input-group">
                     <span class="input-group-addon">
                       <input type="radio" name='upgradeToVersion' value='2024' >
                     </span>
                     <label class="form-control">Revit 2024</label>
-                  </div><!-- /input-group -->
+                  </div>
                 </div>
 
               </div><!-- /.row -->
@@ -144,7 +216,7 @@
                       <input type="checkbox" id='supportRvtCbx' checked=true>
                     </span>
                     <label class="form-control">RVT</label>
-                  </div><!-- /input-group -->
+                  </div>
                 </div>
 
                 <div class="col-lg-4">
@@ -153,7 +225,7 @@
                       <input type="checkbox" id='supportRfaCbx' checked=true>
                     </span>
                     <label class="form-control">RFA</label>
-                  </div><!-- /input-group -->
+                  </div>
                 </div>
                 <div class="col-lg-4">
                   <div class="input-group">
@@ -161,33 +233,46 @@
                       <input type="checkbox" id='supportRteCbx' checked=true>
                     </span>
                     <label class="form-control">RTE</label>
-                  </div><!-- /input-group -->
+                  </div>
                 </div>
               </div><!-- /.row -->
             </form>
-            <!-- </div> -->
             <br />
             <br />
             <div class="btn-group btn-group-lg">
-              <button class="btn btn-lg btn-default" id="upgradeBtn">
-                <span class="glyphicon glyphicon-play"></span>Upgrade
+              <button class="btn btn-lg btn-primary" id="upgradeBtn" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border: none;">
+                <span class="glyphicon glyphicon-play"></span> Start Processing
               </button>
             </div>
             <br />
+            
+            <!-- Processing Mode Indicator -->
+            <div style="margin-top: 15px;">
+              <div class="alert alert-info" id="processingModeIndicator">
+                <strong>🔧 Processing Mode:</strong> 
+                <span id="currentMode">Bulk Processing (Unlimited Files)</span>
+                <br>
+                <small>Toggle the bulk processing checkbox above to switch modes</small>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="row">
           <div style="padding-top: 10px; text-align: left;">
             <label id="upgradeTitle">
-              <h4>Progress</h4>
+              <h4>📊 Progress</h4>
             </label>
           </div>
         </div>
         <div class="row">
           <div>
-            <div style="padding-top: 10px; overflow:auto; text-align: left;">
+            <div style="padding-top: 10px; overflow:auto; text-align: left; max-height: 400px;">
               <div class="list-group" id="logStatus">
+                <div class="list-group-item list-group-item-info">
+                  <strong>Ready to Process Files</strong><br>
+                  <small>Select source and destination folders, then click "Start Processing"</small>
+                </div>
               </div>
             </div>
           </div>
@@ -224,12 +309,14 @@
             <div class="modal-header">
               <button type="button" class="close" data-dismiss="modal" aria-label="Cancel"><span
                   aria-hidden="true">&times;</span></button>
-              <h4 class="modal-title" id="myModalLabel">AppBundle & Activity</h4>
+              <h4 class="modal-title" id="myModalLabel">AppBundle & Activity Configuration</h4>
             </div>
             <div class="modal-body">
-              <div class="alert alert-warning">
-                <center>Define AppBundle &amp; Activity only once.<br />Redefine only when your plugin code change
-                  (creates a new version).</center>
+              <div class="alert alert-info">
+                <center><strong>🔧 Enhanced Configuration</strong><br>
+                Define AppBundle &amp; Activity only once.<br />
+                Redefine only when your plugin code changes (creates a new version).<br>
+                <strong>Now supports bulk processing with unlimited file capacity!</strong></center>
               </div>
               <div class="form-group">
                 <label for="localBundles">Select a local AppBundle:</label>
@@ -237,10 +324,10 @@
                 <b>Tip:</b> Make sure .ZIP bundles are placed at <b>/bundles/</b> folder
               </div>
               <div class="form-group">
-                <label for="engines">Select engine (Versions 2023 is supported):</label>
+                <label for="engines">Select engine (Versions 2023+ supported):</label>
                 <select class="form-control" id="engines"> </select>
               </div>
-              For this sample the .ZIP name is used as suffix to define <b>AppBundle</b> and <b>Activity</b>
+              For this enhanced version, the .ZIP name is used as suffix to define <b>AppBundle</b> and <b>Activity</b>
               names. Activities will have the following parameters: <br>
               &nbsp&nbsp&nbsp&nbsp<b>rvtFile:</b> Input Revit model <br>
               &nbsp&nbsp&nbsp&nbsp<b>resultrvt:</b> Output upgraded revit Rvt file <br>
@@ -255,7 +342,7 @@
                 <div class="progress progress-striped active">
                   <div id='configProgressBar' width=90% class="progress-bar progress-bar-success" role="progressbar"
                     aria-valuenow="60" aria-valuemin="0" aria-valuemax="100" style="width: 0%;">
-                    <span class="sr-only">40% 完成</span>
+                    <span class="sr-only">40% Complete</span>
                   </div>
                 </div>
               </div>
@@ -276,9 +363,13 @@
             <button type="button" class="close" data-dismiss="modal" aria-label="Cancel">
               <span aria-hidden="true">&times;</span>
             </button>
-            <h4 class="modal-title">Thanks for using this sample!</h4>
+            <h4 class="modal-title">🚀 Enhanced Revit Upgrader - BIM 360 Setup</h4>
           </div>
           <div class="modal-body">
+            <div class="alert alert-success">
+              <strong>🎉 New Features Available!</strong><br>
+              This enhanced version now supports bulk processing of unlimited files with advanced queue management.
+            </div>
             <p>To view your BIM 360 Docs files on this app please authorize my APS Client ID with your BIM 360 Docs
               Account.
             </p>
@@ -296,7 +387,7 @@
             </div>
             And this App Name:
             <div class="input-group">
-              <input type="text" readonly="true" aria-describedby="CopyAppName" id="AppName" class="form-control" value="Revit File Upgrader Sample" />
+              <input type="text" readonly="true" aria-describedby="CopyAppName" id="AppName" class="form-control" value="Enhanced Revit File Upgrader with Bulk Processing" />
               <span class="input-group-addon" style="cursor: pointer" data-clipboard-target="#AppName" id="CopyAppName">Copy
                 to clipboard</span>
             </div>
@@ -308,7 +399,8 @@
         </div>
       </div>
     </div>
-    <!-- Modal Provision BIM360 Help  -->
+    
+    <!-- Enhanced Modal Provision BIM360 Help  -->
     <div class="modal fade" id="provisionAccountStepsModal" tabindex="-1" role="dialog" aria-labelledby="myModalLabel">
       <div class="modal-dialog modal-lg" role="document">
         <div class="modal-content">
@@ -316,10 +408,17 @@
             <button type="button" class="close" data-dismiss="modal" aria-label="Cancel">
               <span aria-hidden="true">&times;</span>
             </button>
-            <h4 class="modal-title" id="myModalLabel1">Step-by-step guide</h4>
+            <h4 class="modal-title" id="myModalLabel1">Step-by-step Setup Guide</h4>
           </div>
           <div class="modal-body">
-            <p>To access your BIM 360 Docs files with this app, you need to connect your BIM 360 account with the app.</p>
+            <div class="alert alert-info">
+              <strong>🚀 Enhanced Version Benefits:</strong><br>
+              • Process unlimited files (no more 5-file limit)<br>
+              • Advanced queue management with automatic retry<br>
+              • Real-time progress tracking with WebSocket updates<br>
+              • Smart rate limiting to prevent API quota issues
+            </div>
+            <p>To access your BIM 360 Docs files with this enhanced app, you need to connect your BIM 360 account with the app.</p>
             <ol>
               <li>Log in to
                 <a href="https://bim360enterprise.autodesk.com/" target="_blank">BIM 360 Account Administration
@@ -342,12 +441,11 @@
                 <strong>Next</strong>.
               </li>
               <li>Select
-                <strong>I’m the developer</strong>, and click
+                <strong>I'm the developer</strong>, and click
                 <strong>Next</strong>.</li>
               <li>In the
                 <strong>APS Client ID</strong> and
-                <strong>App Name</strong> fields, enter the APS client ID and app name provided by the app retailer.
-              </li>
+                <strong>App Name</strong> fields, enter the APS client ID and app name provided by the app.</li>
               <li>Select the
                 <strong>I have saved the Account ID information securely</strong> checkbox.</li>
               <li>Click
@@ -355,19 +453,34 @@
                 <img src="./res/Step3.png" width="500" />
               </li>
               <p></p>
-              <p>Congratulations! You can now access your BIM 360 Docs files.</p>
+              <p><strong>🎉 Congratulations!</strong> You can now access your BIM 360 Docs files and process unlimited files with the enhanced bulk processing feature.</p>
             </ol>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-default" data-dismiss="modal">Understood, thanks!</button>
+            <button type="button" class="btn btn-success" data-dismiss="modal">Ready to Process Files!</button>
           </div>
         </div>
       </div>
     </div>
+    
     <script>
         new Clipboard('.input-group-addon');
-      </script>
-
+        
+        // Update processing mode indicator when bulk processing is toggled
+        $('#bulkProcessingCbx').change(function() {
+          const isChecked = this.checked;
+          const bulkSection = document.getElementById('bulkProcessingSection');
+          const modeIndicator = document.getElementById('currentMode');
+          
+          if (isChecked) {
+            bulkSection.classList.add('enabled');
+            modeIndicator.textContent = 'Bulk Processing (Unlimited Files)';
+          } else {
+            bulkSection.classList.remove('enabled');
+            modeIndicator.textContent = 'Legacy Mode (5 File Limit)';
+          }
+        });
+    </script>
 
 </body>
 <iframe id="hiddenFrame" style="visibility: hidden; display: none" />

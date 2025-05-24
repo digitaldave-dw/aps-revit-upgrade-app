@@ -34,7 +34,6 @@ const {
     CreateItemRelationshipsStorage,
     CreateVersionDataRelationshipsItem,
     CreateVersionDataRelationshipsItemData,
-
     StorageRelationshipsTargetData,
     BaseAttributesExtensionObject,
 } = require('forge-apis');
@@ -42,18 +41,65 @@ const {
 const AUTODESK_HUB_BUCKET_KEY = 'wip.dm.prod';
 var workitemList = [];
 
+// Enhanced workitem tracking for bulk operations
+class WorkitemTracker {
+    constructor() {
+        this.activeWorkitems = new Map();
+        this.completedWorkitems = new Map();
+        this.failedWorkitems = new Map();
+    }
+
+    addWorkitem(workitemId, data) {
+        this.activeWorkitems.set(workitemId, {
+            ...data,
+            createdAt: new Date(),
+            status: 'active'
+        });
+    }
+
+    completeWorkitem(workitemId, result) {
+        const workitem = this.activeWorkitems.get(workitemId);
+        if (workitem) {
+            workitem.completedAt = new Date();
+            workitem.result = result;
+            workitem.status = 'completed';
+            this.completedWorkitems.set(workitemId, workitem);
+            this.activeWorkitems.delete(workitemId);
+        }
+    }
+
+    failWorkitem(workitemId, error) {
+        const workitem = this.activeWorkitems.get(workitemId);
+        if (workitem) {
+            workitem.failedAt = new Date();
+            workitem.error = error;
+            workitem.status = 'failed';
+            this.failedWorkitems.set(workitemId, workitem);
+            this.activeWorkitems.delete(workitemId);
+        }
+    }
+
+    getActiveCount() {
+        return this.activeWorkitems.size;
+    }
+
+    getWorkitem(workitemId) {
+        return this.activeWorkitems.get(workitemId) || 
+               this.completedWorkitems.get(workitemId) || 
+               this.failedWorkitems.get(workitemId);
+    }
+}
+
+const workitemTracker = new WorkitemTracker();
 
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Get workitem status
 ///////////////////////////////////////////////////////////////////////
 function getWorkitemStatus(workItemId, access_token) {
-
     return new Promise(function (resolve, reject) {
-
         var options = {
             method: 'GET',
-            url: designAutomation.endpoint +'workitems/'+ workItemId,
+            url: designAutomation.endpoint + 'workitems/' + workItemId,
             headers: {
                 Authorization: 'Bearer ' + access_token,
                 'Content-Type': 'application/json'
@@ -62,7 +108,7 @@ function getWorkitemStatus(workItemId, access_token) {
 
         request(options, function (error, response, body) {
             if (error) {
-                reject(err);
+                reject(error);
             } else {
                 let resp;
                 try {
@@ -89,16 +135,13 @@ function getWorkitemStatus(workItemId, access_token) {
 }
 
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Cancel workitem
 ///////////////////////////////////////////////////////////////////////
 function cancelWorkitem(workItemId, access_token) {
-
     return new Promise(function (resolve, reject) {
-
         var options = {
             method: 'DELETE',
-            url: designAutomation.endpoint +'workitems/'+ workItemId,
+            url: designAutomation.endpoint + 'workitems/' + workItemId,
             headers: {
                 Authorization: 'Bearer ' + access_token,
                 'Content-Type': 'application/json'
@@ -107,7 +150,7 @@ function cancelWorkitem(workItemId, access_token) {
 
         request(options, function (error, response, body) {
             if (error) {
-                reject(err);
+                reject(error);
             } else {
                 let resp;
                 try {
@@ -133,25 +176,40 @@ function cancelWorkitem(workItemId, access_token) {
     });
 }
 
-
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Enhanced upgrade file function with better error handling and queue management
 ///////////////////////////////////////////////////////////////////////
 function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExtension, access_token_3Legged, access_token_2Legged, isNewVersion = false) {
     return new Promise(function (resolve, reject) {
-        // Create workitem body
-        console.log(`upgradeFile called with isNewVersion=${isNewVersion}`);
-        console.log(`createVersionData.data.type = ${createVersionData.data.type}`);
+        // Validate required parameters
+        if (!inputUrl || !outputUrl || !projectId || !createVersionData) {
+            return reject(new Error('Missing required parameters for upgradeFile'));
+        }
+
+        console.log(`upgradeFile called with parameters:
+            - isNewVersion=${isNewVersion}
+            - createVersionData.data.type=${createVersionData.data.type}
+            - fileExtension=${fileExtension}
+            - projectId=${projectId}
+            - activeWorkitems=${workitemTracker.getActiveCount()}`);
+
+        // Check if we're approaching DA limits
+        if (workitemTracker.getActiveCount() >= 5) {
+            return reject(new Error('Maximum concurrent workitems reached. Please wait for some to complete.'));
+        }
+
+        // Ensure createVersionData integrity
+        if (isNewVersion === true && createVersionData.data.type !== "versions") {
+            console.warn("WARNING: Correcting inconsistent data - isNewVersion=true but data.type is not 'versions'");
+            createVersionData.data.type = "versions";
+        }
+
         const workitemBody = createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token_3Legged.access_token);
-        
         if (workitemBody === null) {
             reject('workitem request body is null');
             return;
         }
-        
-        // Create and execute workitem
+
         var options = {
             method: 'POST',
             url: designAutomation.endpoint + 'workitems',
@@ -162,29 +220,51 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             body: workitemBody,
             json: true
         };
-        
+
+        console.log('Submitting workitem to DA...');
+
         request(options, function (error, response, body) {
             if (error) {
+                console.log('Workitem submission error:', error);
                 reject(error);
                 return;
             }
-            
+
             let resp;
             try {
-                resp = JSON.parse(body);
+                resp = typeof body === 'string' ? JSON.parse(body) : body;
             } catch (e) {
                 resp = body;
             }
-            
-            // Force isNewVersion to true if createVersionData.data.type is "versions"
-            const isVersionOperation = isNewVersion === true || 
-                                      (createVersionData && 
-                                       createVersionData.data && 
-                                       createVersionData.data.type === 'versions');
-            
-            console.log(`Storing workitem with isNewVersion=${isVersionOperation}, dataType=${createVersionData.data.type}`);
-            
-            workitemList.push({
+
+            if (response.statusCode >= 400) {
+                console.log('Workitem submission failed:', response.statusCode, response.statusMessage);
+                
+                // Handle specific DA API errors
+                if (response.statusCode === 429) {
+                    reject(new Error('Rate limit exceeded. Please wait before submitting more workitems.'));
+                } else if (response.statusCode === 400 && resp.Error && resp.Error.includes('quota')) {
+                    reject(new Error('Workitem quota exceeded. Please wait for current jobs to complete.'));
+                } else {
+                    reject({
+                        statusCode: response.statusCode,
+                        statusMessage: response.statusMessage,
+                        details: resp
+                    });
+                }
+                return;
+            }
+
+            // Determine operation type
+            const isExplicitlyNewVersion = Boolean(isNewVersion);
+            const hasVersionDataType = createVersionData?.data?.type === 'versions';
+            const isVersionOperation = isExplicitlyNewVersion || hasVersionDataType;
+
+            console.log(`Workitem submitted successfully: ${resp.id}`);
+            console.log(`- Operation type: ${isVersionOperation ? 'VERSION' : 'ITEM'}`);
+
+            // Enhanced workitem data storage
+            const workitemData = {
                 workitemId: resp.id,
                 projectId: projectId,
                 createVersionData: createVersionData,
@@ -193,145 +273,143 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
                     refresh_token: access_token_3Legged.refresh_token,
                     expires_at: access_token_3Legged.expires_at
                 },
-                // Critical change: Make sure this is set correctly
                 isNewVersion: isVersionOperation,
-                operationType: createVersionData.data.type, // Store the data type as well
+                operationType: createVersionData.data.type,
                 fileItemId: createVersionData.data.relationships && 
                            createVersionData.data.relationships.item && 
                            createVersionData.data.relationships.item.data ? 
-                           createVersionData.data.relationships.item.data.id : null
+                           createVersionData.data.relationships.item.data.id : null,
+                submittedAt: new Date(),
+                inputUrl: inputUrl,
+                outputUrl: outputUrl,
+                fileExtension: fileExtension
+            };
+
+            // Add to both tracking systems
+            workitemList.push(workitemData);
+            workitemTracker.addWorkitem(resp.id, workitemData);
+
+            resolve({
+                statusCode: response.statusCode,
+                headers: response.headers,
+                body: resp
             });
-            
-            if (response.statusCode >= 400) {
-                console.log('Error:', response.statusCode, response.statusMessage);
-                reject({
-                    statusCode: response.statusCode,
-                    statusMessage: response.statusMessage
-                });
-            } else {
-                resolve({
-                    statusCode: response.statusCode,
-                    headers: response.headers,
-                    body: resp
-                });
-            }
         });
     });
 }
 
-
-
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Get latest version info
 ///////////////////////////////////////////////////////////////////////
 async function getLatestVersionInfo(projectId, fileId, oauth_client, oauth_token) {
     if (projectId === '' || fileId === '') {
-        console.log('failed to get lastest version of the file');
+        console.log('failed to get latest version of the file');
         return null;
     }
 
-    // get the storage of the input item version
-    const versionItem = await getLatestVersion(projectId, fileId, oauth_client, oauth_token);
-    if (versionItem === null) {
-        console.log('failed to get lastest version of the file');
+    try {
+        const versionItem = await getLatestVersion(projectId, fileId, oauth_client, oauth_token);
+        if (versionItem === null) {
+            console.log('failed to get latest version of the file');
+            return null;
+        }
+        return {
+            "versionStorageId": versionItem.relationships.storage.data.id,
+            "versionType": versionItem.attributes.extension.type
+        };
+    } catch (error) {
+        console.log('Error getting latest version info:', error);
         return null;
     }
-    return {
-        "versionStorageId": versionItem.relationships.storage.data.id,
-        "versionType": versionItem.attributes.extension.type
-    };
 }
 
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Get latest version
 ///////////////////////////////////////////////////////////////////////
 async function getLatestVersion(projectId, itemId, oauthClient, credentials) {
-    const items = new ItemsApi();
-    const versions = await items.getItemVersions(projectId, itemId, {}, oauthClient, credentials);
-    if(versions === null || versions.statusCode !== 200 ){
-        console.log('failed to get the versions of file');
-        res.status(500).end('failed to get the versions of file');
+    try {
+        const items = new ItemsApi();
+        const versions = await items.getItemVersions(projectId, itemId, {}, oauthClient, credentials);
+        if (versions === null || versions.statusCode !== 200) {
+            console.log('failed to get the versions of file');
+            return null;
+        }
+        return versions.body.data[0];
+    } catch (error) {
+        console.log('Error getting latest version:', error);
         return null;
     }
-    return versions.body.data[0];
 }
 
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Create new storage
 ///////////////////////////////////////////////////////////////////////
 async function getNewCreatedStorageInfo(projectId, folderId, fileName, oauth_client, oauth_token) {
-
-    // create body for Post Storage request
-    let createStorageBody = createBodyOfPostStorage(folderId, fileName);
-
-    const project = new ProjectsApi();
-    let storage = await project.postStorage(projectId, createStorageBody, oauth_client, oauth_token);
-    if (storage === null || storage.statusCode !== 201) {
-        console.log('failed to create a storage.');
+    try {
+        let createStorageBody = createBodyOfPostStorage(folderId, fileName);
+        const project = new ProjectsApi();
+        let storage = await project.postStorage(projectId, createStorageBody, oauth_client, oauth_token);
+        if (storage === null || storage.statusCode !== 201) {
+            console.log('failed to create a storage.');
+            return null;
+        }
+        return {
+            "StorageId": storage.body.data.id
+        };
+    } catch (error) {
+        console.log('Error creating storage:', error);
         return null;
     }
-    return {
-        "StorageId": storage.body.data.id
-    };
 }
 
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Create item body
 ///////////////////////////////////////////////////////////////////////
-function createBodyOfPostItem( fileName, folderId, storageId, itemType, versionType){
-    const body = 
-    {
-        "jsonapi":{
-            "version":"1.0"
+function createBodyOfPostItem(fileName, folderId, storageId, itemType, versionType) {
+    const body = {
+        "jsonapi": {
+            "version": "1.0"
         },
-        "data":{
-            "type":"items",
-            "attributes":{
-                "name":fileName,
-                "extension":{
-                    "type":itemType,
-                    "version":"1.0"
+        "data": {
+            "type": "items",
+            "attributes": {
+                "name": fileName,
+                "extension": {
+                    "type": itemType,
+                    "version": "1.0"
                 }
             },
-            "relationships":{
-                "tip":{
-                    "data":{
-                        "type":"versions",
-                        "id":"1"
+            "relationships": {
+                "tip": {
+                    "data": {
+                        "type": "versions",
+                        "id": "1"
                     }
                 },
-                "parent":{
-                    "data":{
-                        "type":"folders",
-                        "id":folderId
+                "parent": {
+                    "data": {
+                        "type": "folders",
+                        "id": folderId
                     }
                 }
             }
         },
-        "included":[
+        "included": [
             {
-                "type":"versions",
-                "id":"1",
-                "attributes":{
-                    "name":fileName,
-                    "extension":{
-                        "type":versionType,
-                        "version":"1.0"
+                "type": "versions",
+                "id": "1",
+                "attributes": {
+                    "name": fileName,
+                    "extension": {
+                        "type": versionType,
+                        "version": "1.0"
                     }
                 },
-                "relationships":{
-                    "storage":{
-                        "data":{
-                            "type":"objects",
-                            "id":storageId
+                "relationships": {
+                    "storage": {
+                        "data": {
+                            "type": "objects",
+                            "id": storageId
                         }
                     }
                 }
@@ -341,14 +419,10 @@ function createBodyOfPostItem( fileName, folderId, storageId, itemType, versionT
     return body;
 }
 
-
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Create storage body
 ///////////////////////////////////////////////////////////////////////
 function createBodyOfPostStorage(folderId, fileName) {
-    // create a new storage for the ouput item version
     let createStorage = new CreateStorage();
     let storageRelationshipsTargetData = new StorageRelationshipsTargetData("folders", folderId);
     let storageRelationshipsTarget = new StorageRelationshipsTarget;
@@ -367,86 +441,17 @@ function createBodyOfPostStorage(folderId, fileName) {
     return createStorage;
 }
 
-
-
 ///////////////////////////////////////////////////////////////////////
-// /
-// /
+/// Enhanced version creation with proper metadata
 ///////////////////////////////////////////////////////////////////////
-// Modified createBodyOfPostVersion function for da4revitImp.js
-// function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targetVersion) {
-//     // Create relationships to the item and storage
-//     let createVersionDataRelationshipsItem = new CreateVersionDataRelationshipsItem();
-//     let createVersionDataRelationshipsItemData = new CreateVersionDataRelationshipsItemData();
-//     createVersionDataRelationshipsItemData.type = "items";
-//     createVersionDataRelationshipsItemData.id = fileId;
-//     createVersionDataRelationshipsItem.data = createVersionDataRelationshipsItemData;
-
-//     let createItemRelationshipsStorage = new CreateItemRelationshipsStorage();
-//     let createItemRelationshipsStorageData = new CreateItemRelationshipsStorageData();
-//     createItemRelationshipsStorageData.type = "objects";
-//     createItemRelationshipsStorageData.id = storageId;
-//     createItemRelationshipsStorage.data = createItemRelationshipsStorageData;
-
-//     let createVersionDataRelationships = new CreateVersionDataRelationships();
-//     createVersionDataRelationships.item = createVersionDataRelationshipsItem;
-//     createVersionDataRelationships.storage = createItemRelationshipsStorage;
-
-//     // Create extension object with upgrade metadata
-//     let baseAttributesExtensionObject = new BaseAttributesExtensionObject();
-//     baseAttributesExtensionObject.type = versionType;
-//     baseAttributesExtensionObject.version = "1.0";
-    
-//     // Add upgrade metadata without modifying filename
-//     if (targetVersion) {
-//         baseAttributesExtensionObject.data = {
-//             upgradeInfo: {
-//                 targetVersion: targetVersion,
-//                 upgradeDate: new Date().toISOString(),
-//                 processedBy: "APS Revit Upgrader"
-//             }
-//         };
-//     }
-
-//     // Create attributes with original filename
-//     let createStorageDataAttributes = new CreateStorageDataAttributes();
-//     createStorageDataAttributes.name = fileName; // Keep original filename
-//     createStorageDataAttributes.extension = baseAttributesExtensionObject;
-
-//     // Create version data structure
-//     let createVersionData = new CreateVersionData();
-//     createVersionData.type = "versions";
-//     createVersionData.attributes = createStorageDataAttributes;
-//     createVersionData.relationships = createVersionDataRelationships;
-
-//     // Final version structure without 'included' array
-//     let createVersion = new CreateVersion();
-//     createVersion.data = createVersionData;
-
-//     return createVersion;
-    
-// }
-
 function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targetVersion) {
-    // Create a direct JSON structure instead of using Forge API classes
-    // This avoids any unexpected payload transformations
-    
-    // Add upgrade metadata
-    const extensionData = targetVersion ? {
-        upgradeInfo: {
-            targetVersion: targetVersion,
-            upgradeDate: new Date().toISOString(),
-            processedBy: "APS Revit Upgrader"
-        }
-    } : {};
-    
     // Create the exact JSON structure required by the API
     const versionBody = {
         "jsonapi": {
             "version": "1.0"
         },
         "data": {
-            "type": "versions",
+            "type": "versions", // Explicitly use "versions" type
             "attributes": {
                 "name": fileName,
                 "extension": {
@@ -478,24 +483,26 @@ function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targe
         }
     };
     
-    // Log the payload for debugging
-    console.log('Version payload:', JSON.stringify(versionBody, null, 2));
-    
+    console.log('Version payload data type:', versionBody.data.type);
     return versionBody;
 }
 
-
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// Create workitem body with enhanced error handling
 ///////////////////////////////////////////////////////////////////////
 function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token) {
+    if (!designAutomation.nickname || !designAutomation.activity_name || !designAutomation.appbundle_activity_alias) {
+        console.error('Missing Design Automation configuration');
+        return null;
+    }
 
+    const activityId = `${designAutomation.nickname}.${designAutomation.activity_name}+${designAutomation.appbundle_activity_alias}`;
+    
     let body = null;
     switch (fileExtension) {
         case 'rvt':
             body = {
-                activityId:  designAutomation.nickname + '.'+designAutomation.activity_name+'+'+designAutomation.appbundle_activity_alias,
+                activityId: activityId,
                 arguments: {
                     rvtFile: {
                         url: inputUrl,
@@ -519,7 +526,7 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
             break;
         case 'rfa':
             body = {
-                activityId:  designAutomation.nickname + '.'+designAutomation.activity_name+'+'+designAutomation.appbundle_activity_alias,
+                activityId: activityId,
                 arguments: {
                     rvtFile: {
                         url: inputUrl,
@@ -541,9 +548,10 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
                 }
             };
             break;
+        case 'fte':
         case 'rte':
             body = {
-                activityId:  designAutomation.nickname + '.'+designAutomation.activity_name+'+'+designAutomation.appbundle_activity_alias,
+                activityId: activityId,
                 arguments: {
                     rvtFile: {
                         url: inputUrl,
@@ -565,10 +573,18 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
                 }
             };
             break;
+        default:
+            console.error('Unsupported file extension:', fileExtension);
+            return null;
     }
+    
+    console.log(`Created workitem body for ${fileExtension} file with activity: ${activityId}`);
     return body;
 }
 
+///////////////////////////////////////////////////////////////////////
+/// Check if file was already upgraded to target version
+///////////////////////////////////////////////////////////////////////
 async function isFileAlreadyUpgraded(projectId, fileId, targetVersion, oauthClient, credentials) {
     try {
         const items = new ItemsApi();
@@ -596,100 +612,27 @@ async function isFileAlreadyUpgraded(projectId, fileId, targetVersion, oauthClie
     }
 }
 
-function createNewVersionDirectApi(projectId, itemId, storageId, fileName, versionType, accessToken) {
-    return new Promise((resolve, reject) => {
-        const payload = {
-            "jsonapi": {
-                "version": "1.0"
-            },
-            "data": {
-                "type": "versions",
-                "attributes": {
-                    "name": fileName,
-                    "extension": {
-                        "type": versionType,
-                        "version": "1.0"
-                    }
-                },
-                "relationships": {
-                    "item": {
-                        "data": {
-                            "type": "items",
-                            "id": itemId
-                        }
-                    },
-                    "storage": {
-                        "data": {
-                            "type": "objects",
-                            "id": storageId
-                        }
-                    }
-                }
-            }
-        };
-
-        console.log('Creating version with direct API call');
-        console.log('Project ID:', projectId);
-        console.log('Item ID:', itemId);
-        console.log('Storage ID:', storageId);
-        console.log('Payload:', JSON.stringify(payload, null, 2));
-
-        const options = {
-            method: 'POST',
-            url: `https://developer.api.autodesk.com/data/v1/projects/${projectId}/versions`,
-            headers: {
-                'Content-Type': 'application/vnd.api+json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        };
-
-        request(options, (error, response, body) => {
-            if (error) {
-                console.log('Direct API call error:', error);
-                reject(error);
-                return;
-            }
-
-            console.log('Direct API response status:', response.statusCode);
-            
-            let responseData;
-            try {
-                responseData = JSON.parse(body);
-                console.log('Direct API response body:', JSON.stringify(responseData, null, 2));
-            } catch (e) {
-                console.log('Response is not JSON:', body);
-                responseData = body;
-            }
-
-            if (response.statusCode >= 400) {
-                console.log('Direct API error:', response.statusCode, response.statusMessage);
-                reject({
-                    statusCode: response.statusCode,
-                    statusMessage: response.statusMessage,
-                    body: responseData
-                });
-            } else {
-                console.log('Version created successfully!');
-                resolve({
-                    statusCode: response.statusCode,
-                    headers: response.headers,
-                    body: responseData
-                });
-            }
-        });
-    });
+function findWorkitemById(workitemId) {
+    const workitem = workitemList.find(item => item.workitemId === workitemId);
+    if (workitem) {
+        console.log(`✅ Found workitem ${workitemId} in list`);
+        return workitem;
+    } else {
+        console.log(`❌ Workitem ${workitemId} NOT found. Available:`, workitemList.map(w => w.workitemId));
+        return null;
+    }
 }
 
-async function checkFileExists(projectId, folderId, fileName, oauth_client, oauth_token) {
-    const folders = new FoldersApi();
-    const contents = await folders.getFolderContents(projectId, folderId, {}, oauth_client, oauth_token);
-    
-    return contents.body.data.some(item => 
-        item.attributes.displayName === fileName || item.attributes.name === fileName
-    );
+///////////////////////////////////////////////////////////////////////
+/// Get active workitem count for rate limiting
+///////////////////////////////////////////////////////////////////////
+function getActiveWorkitemCount() {
+    return workitemTracker.getActiveCount();
 }
 
+///////////////////////////////////////////////////////////////////////
+/// Log payload for debugging
+///////////////////////////////////////////////////////////////////////
 function logPayload(title, payload) {
     console.log(`------ ${title} ------`);
     console.log(JSON.stringify(payload, null, 2));
@@ -697,9 +640,7 @@ function logPayload(title, payload) {
     return payload; 
 }
 
-
-module.exports = 
-{ 
+module.exports = { 
     getWorkitemStatus, 
     cancelWorkitem, 
     upgradeFile, 
@@ -709,7 +650,8 @@ module.exports =
     createBodyOfPostItem,
     isFileAlreadyUpgraded,
     logPayload,
-    createNewVersionDirectApi,
-    checkFileExists,
-    workitemList 
+    getActiveWorkitemCount,
+    workitemList,
+    workitemTracker,
+    findWorkitemById
 };
