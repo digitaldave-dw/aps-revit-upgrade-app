@@ -457,13 +457,13 @@ function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targe
                 "extension": {
                     "type": versionType,
                     "version": "1.0",
-                    "data": targetVersion ? {
-                        "upgradeInfo": {
-                            "targetVersion": targetVersion,
-                            "upgradeDate": new Date().toISOString(),
-                            "processedBy": "APS Revit Upgrader"
-                        }
-                    } : {}
+                    // "data": targetVersion ? {
+                    //     "upgradeInfo": {
+                    //         "targetVersion": targetVersion,
+                    //         "upgradeDate": new Date().toISOString(),
+                    //         "processedBy": "APS Revit Upgrader"
+                    //     }
+                    // } : {}
                 }
             },
             "relationships": {
