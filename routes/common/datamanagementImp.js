@@ -19,6 +19,42 @@ const request = require("request");
 const { HubsApi, ProjectsApi, FoldersApi, ItemsApi } = require('forge-apis');
 
 
+function isWorksharingFile(item) {
+    // Add detailed logging to understand what we're checking
+    console.log('Checking item for worksharing:', {
+        name: item.attributes?.displayName || item.attributes?.name,
+        type: item.type,
+        extensionType: item.attributes?.extension?.type,
+        fullItem: item
+    });
+    
+    // Check multiple possible indicators of workshared files
+    if (item.attributes && item.attributes.extension) {
+        const extensionType = item.attributes.extension.type;
+        
+        // Check for C4R model type
+        if (extensionType === 'versions:autodesk.bim360:C4RModel') {
+            console.log('Found C4R workshared file:', item.attributes.displayName || item.attributes.name);
+            return true;
+        }
+        
+        // Also check for other possible worksharing indicators
+        if (extensionType && extensionType.includes('C4R')) {
+            console.log('Found file with C4R in extension type:', extensionType);
+            return true;
+        }
+        
+        // Check if the item has worksharing-related attributes
+        if (item.attributes.extension.data && 
+            item.attributes.extension.data.isCompositeDesign) {
+            console.log('Found composite design (workshared) file:', item.attributes.displayName || item.attributes.name);
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 ///////////////////////////////////////////////////////////////////////
 ///
 ///
@@ -154,21 +190,107 @@ async function getFolders(hubId, projectId, oauthClient, credentials, res) {
 
 async function getFolderContents(projectId, folderId, oauthClient, credentials, res) {
     const folders = new FoldersApi();
+    
+    try {
+        console.log(`Getting folder contents for project: ${projectId}, folder: ${folderId}`);
+        const contents = await folders.getFolderContents(projectId, folderId, {}, oauthClient, credentials);
+        
+        console.log(`Found ${contents.body.data.length} items in folder`);
+        
+        // Count different types of files
+        let revitFileCount = 0;
+        let worksharedCount = 0;
+        let otherCount = 0;
+        
+        const treeNodes = contents.body.data.map((item) => {
+            var name = (item.attributes.displayName !== null ? item.attributes.displayName : item.attributes.name);
+            
+            if (name !== '') {
+                // Check file extension
+                const extension = name.split('.').pop().toLowerCase();
+                if (extension === 'rvt') {
+                    revitFileCount++;
+                }
+                
+                // Check if this is a workshared file
+                const isWorkshared = isWorksharingFile(item);
+                if (isWorkshared) {
+                    worksharedCount++;
+                }
+                
+                // Add worksharing indicator to the name if applicable
+                if (isWorkshared && item.type === 'items') {
+                    name = '🔒 ' + name + ' (Workshared)';
+                }
+                
+                // Create the tree node with additional metadata
+                const node = createTreeNode(
+                    item.links.self.href,
+                    name,
+                    isWorkshared ? 'workshared-item' : item.type,
+                    item.type === 'folders'
+                );
+                
+                // Add metadata to help with filtering
+                node.isWorkshared = isWorkshared;
+                if (item.attributes && item.attributes.extension) {
+                    node.extensionType = item.attributes.extension.type;
+                }
+                
+                // Add original data for debugging
+                node.original = {
+                    extensionType: item.attributes?.extension?.type,
+                    extensionData: item.attributes?.extension?.data
+                };
+                
+                return node;
+            } else {
+                otherCount++;
+                return null;
+            }
+        });
+        
+        console.log(`Folder analysis: ${revitFileCount} Revit files, ${worksharedCount} workshared, ${otherCount} other`);
+        
+        res.json(treeNodes.filter(node => node !== null));
+    } catch (error) {
+        console.error('Error getting folder contents:', error);
+        res.status(500).json({ error: 'Failed to get folder contents' });
+    }
+}
+
+
+async function getFolderContentsForUpgrade(projectId, folderId, oauthClient, credentials) {
+    const folders = new FoldersApi();
     const contents = await folders.getFolderContents(projectId, folderId, {}, oauthClient, credentials);
-    const treeNodes = contents.body.data.map((item) => {
-        var name = (item.attributes.displayName !== null ? item.attributes.displayName : item.attributes.name);
-        if (name !== '') { // BIM 360 Items with no displayName also don't have storage, so not file to transfer
-            return createTreeNode(
-                item.links.self.href,
-                name,
-                item.type,
-                true
-            );
-        } else {
-            return null;
+    
+    // Filter out workshared files and return only upgradeable items
+    const upgradeableItems = contents.body.data.filter((item) => {
+        // Skip if not an item (could be a folder)
+        if (item.type !== 'items') return false;
+        
+        // Skip if no name
+        const name = item.attributes.displayName || item.attributes.name;
+        if (!name || name === '') return false;
+        
+        // Skip if workshared
+        if (isWorksharingFile(item)) {
+            console.log(`Skipping workshared file: ${name}`);
+            return false;
         }
+        
+        // Check file extension
+        const extension = name.split('.').pop().toLowerCase();
+        const supportedExtensions = ['rvt', 'rfa', 'rte'];
+        
+        return supportedExtensions.includes(extension);
     });
-    res.json(treeNodes.filter(node => node !== null));
+    
+    return {
+        allItems: contents.body.data,
+        upgradeableItems: upgradeableItems,
+        worksharedCount: contents.body.data.filter(isWorksharingFile).length
+    };
 }
 
 async function getVersions(projectId, itemId, oauthClient, credentials, res) {
@@ -201,5 +323,7 @@ module.exports = {
     getProjects,
     getFolders,
     getFolderContents,
-    getVersions
+    getVersions,
+    isWorksharingFile,
+    getFolderContentsForUpgrade
 }

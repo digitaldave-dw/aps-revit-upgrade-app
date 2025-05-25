@@ -486,38 +486,62 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
     try {
         console.log('Starting bulk processing for:', { projectId, folderId, targetVersion, supportedTypes });
 
-        // Get folder contents
-        const folders = new FoldersApi();
-        const contents = await folders.getFolderContents(projectId, folderId, {}, req.oauth_client, req.oauth_token);
+        // Import the helper function
+        const { getFolderContentsForUpgrade, isWorksharingFile } = require('./common/datamanagementImp');
         
-        // Filter for supported Revit files
-        const revitFiles = contents.body.data.filter(item => {
-            if (item.type !== 'items') return false;
-            
+        // Get folder contents with worksharing filtering
+        const folderData = await getFolderContentsForUpgrade(
+            projectId, 
+            folderId, 
+            req.oauth_client, 
+            req.oauth_token
+        );
+        
+        // Get the upgradeable items (already filtered)
+        const revitFiles = folderData.upgradeableItems.filter(item => {
             const fileName = item.attributes.displayName || item.attributes.name;
-            if (!fileName) return false;
-            
             const extension = fileName.split('.').pop().toLowerCase();
-            
-            // Check if extension is in supported types
             return supportedTypes.includes(extension);
         });
 
-        if (revitFiles.length === 0) {
-            return res.status(404).json({ 
-                error: 'No supported Revit files found in folder',
-                supportedExtensions: supportedTypes
-            });
-        }
+        // Count excluded files
+        const excludedWorksharedFiles = folderData.allItems.filter(item => {
+            if (item.type !== 'items') return false;
+            const fileName = item.attributes.displayName || item.attributes.name;
+            if (!fileName) return false;
+            const extension = fileName.split('.').pop().toLowerCase();
+            
+            // Check if it would have been included but is workshared
+            return supportedTypes.includes(extension) && isWorksharingFile(item);
+        });
 
         console.log(`Found ${revitFiles.length} Revit files for bulk processing`);
+        console.log(`Excluded ${excludedWorksharedFiles.length} workshared files`);
+
+        if (revitFiles.length === 0) {
+            let errorMessage = 'No supported Revit files found in folder';
+            
+            if (excludedWorksharedFiles.length > 0) {
+                errorMessage += `. ${excludedWorksharedFiles.length} workshared files were excluded from processing`;
+            }
+            
+            return res.status(404).json({ 
+                error: errorMessage,
+                supportedExtensions: supportedTypes,
+                excludedWorksharedCount: excludedWorksharedFiles.length,
+                excludedWorksharedFiles: excludedWorksharedFiles.map(f => 
+                    f.attributes.displayName || f.attributes.name
+                )
+            });
+        }
 
         // Prepare files for queue
         const filesToProcess = revitFiles.map(item => ({
             fileItemId: item.links.self.href,
             fileItemName: item.attributes.displayName || item.attributes.name,
             projectId: projectId,
-            itemId: item.id
+            itemId: item.id,
+            extensionType: item.attributes.extension?.type || 'unknown'
         }));
 
         // Get 2-legged token for Design Automation
@@ -537,8 +561,14 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
             success: true,
             batchId,
             totalFiles: filesToProcess.length,
-            message: `Started bulk processing of ${filesToProcess.length} files`,
-            files: filesToProcess.map(f => f.fileItemName)
+            excludedWorksharedCount: excludedWorksharedFiles.length,
+            message: `Started bulk processing of ${filesToProcess.length} files` + 
+                     (excludedWorksharedFiles.length > 0 ? 
+                      ` (${excludedWorksharedFiles.length} workshared files excluded)` : ''),
+            files: filesToProcess.map(f => f.fileItemName),
+            excludedFiles: excludedWorksharedFiles.map(f => 
+                f.attributes.displayName || f.attributes.name
+            )
         });
 
     } catch (err) {
