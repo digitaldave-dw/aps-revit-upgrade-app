@@ -55,6 +55,7 @@ class WorkitemTracker {
             createdAt: new Date(),
             status: 'active'
         });
+        console.log(`WorkitemTracker: Added ${workitemId}, active count: ${this.activeWorkitems.size}`);
     }
 
     completeWorkitem(workitemId, result) {
@@ -65,6 +66,7 @@ class WorkitemTracker {
             workitem.status = 'completed';
             this.completedWorkitems.set(workitemId, workitem);
             this.activeWorkitems.delete(workitemId);
+            console.log(`WorkitemTracker: Completed ${workitemId}, active count: ${this.activeWorkitems.size}`);
         }
     }
 
@@ -76,6 +78,15 @@ class WorkitemTracker {
             workitem.status = 'failed';
             this.failedWorkitems.set(workitemId, workitem);
             this.activeWorkitems.delete(workitemId);
+            console.log(`WorkitemTracker: Failed ${workitemId}, active count: ${this.activeWorkitems.size}`);
+        }
+    }
+
+    removeWorkitem(workitemId) {
+        // This method ensures workitem is removed from tracking
+        if (this.activeWorkitems.has(workitemId)) {
+            this.activeWorkitems.delete(workitemId);
+            console.log(`WorkitemTracker: Removed ${workitemId}, active count: ${this.activeWorkitems.size}`);
         }
     }
 
@@ -186,15 +197,16 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             return reject(new Error('Missing required parameters for upgradeFile'));
         }
 
+        const activeCount = workitemTracker.getActiveCount();
         console.log(`upgradeFile called with parameters:
             - isNewVersion=${isNewVersion}
             - createVersionData.data.type=${createVersionData.data.type}
             - fileExtension=${fileExtension}
             - projectId=${projectId}
-            - activeWorkitems=${workitemTracker.getActiveCount()}`);
+            - activeWorkitems=${activeCount}`);
 
         // Check if we're approaching DA limits
-        if (workitemTracker.getActiveCount() >= 5) {
+        if (activeCount >= 5) {
             return reject(new Error('Maximum concurrent workitems reached. Please wait for some to complete.'));
         }
 
@@ -256,9 +268,7 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             }
 
             // Determine operation type
-            const isExplicitlyNewVersion = Boolean(isNewVersion);
-            const hasVersionDataType = createVersionData?.data?.type === 'versions';
-            const isVersionOperation = isExplicitlyNewVersion || hasVersionDataType;
+            const isVersionOperation = isNewVersion || createVersionData?.data?.type === 'versions';
 
             console.log(`Workitem submitted successfully: ${resp.id}`);
             console.log(`- Operation type: ${isVersionOperation ? 'VERSION' : 'ITEM'}`);
@@ -268,17 +278,10 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
                 workitemId: resp.id,
                 projectId: projectId,
                 createVersionData: createVersionData,
-                access_token_3Legged: {
-                    access_token: access_token_3Legged.access_token,
-                    refresh_token: access_token_3Legged.refresh_token,
-                    expires_at: access_token_3Legged.expires_at
-                },
+                access_token_3Legged: access_token_3Legged,
                 isNewVersion: isVersionOperation,
                 operationType: createVersionData.data.type,
-                fileItemId: createVersionData.data.relationships && 
-                           createVersionData.data.relationships.item && 
-                           createVersionData.data.relationships.item.data ? 
-                           createVersionData.data.relationships.item.data.id : null,
+                fileItemId: createVersionData.data.relationships?.item?.data?.id,
                 submittedAt: new Date(),
                 inputUrl: inputUrl,
                 outputUrl: outputUrl,

@@ -164,6 +164,10 @@ var currentBatchId = null;
 var bulkProcessingActive = false;
 var bulkProgressInterval = null;
 
+var totalFilesProcessed = 0;  // NEW: Track total files processed
+var fileQueue = [];            // NEW: Queue for pending files
+var isProcessingQueue = false; // NEW: Flag to prevent concurrent queue processing
+
 const ItemType = {
   FILE : 1,
   FOLDER: 2
@@ -182,19 +186,41 @@ const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
 socketio = io();
 
 // Enhanced socket handling for both individual and bulk processing
+socketio = io();
 socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
   console.log(data);
   updateListItem(data.WorkitemId, data.Status);
-  if(data.Status.toLowerCase() === 'completed' || data.Status.toLowerCase() === 'failed' || data.Status.toLowerCase() === 'cancelled'){
-    workitemList.pop(data.WorkitemId);
+  
+  if(data.Status.toLowerCase() === 'completed' || 
+     data.Status.toLowerCase() === 'failed' || 
+     data.Status.toLowerCase() === 'cancelled'){
+    
+    // Properly remove the specific workitem
+    const index = workitemList.findIndex(item => item === data.WorkitemId);
+    if(index !== -1) {
+      workitemList.splice(index, 1);
+    }
+    
+    totalFilesProcessed++;
+    
+    // Process next file in queue if available
+    if(workitemList.length < FileLimitation && fileQueue.length > 0) {
+      processNextInQueue();
+    }
   }
-  // Mark as finished when the workitemList is empty
-  if(workitemList.length === 0 && !bulkProcessingActive){
+  
+  // Check if all processing is complete
+  if(workitemList.length === 0 && fileQueue.length === 0){
     let upgradeBtnElm = document.getElementById('upgradeBtn');
     upgradeBtnElm.disabled = false;
-    document.getElementById('upgradeTitle').innerHTML = "<h4>✅ Upgrade Fully Completed!</h4>";
+    document.getElementById('upgradeTitle').innerHTML = 
+      `<h4>Upgrade Fully Completed! (${totalFilesProcessed} files processed)</h4>`;
 
-    // refresh the selected node
+    // Reset counters for next run
+    fileNumber = 0;
+    totalFilesProcessed = 0;
+    
+    // Refresh the tree nodes
     if(sourceNode !== null){
       let instance = $('#sourceHubs').jstree(true);
       instance.refresh_node(sourceNode);
@@ -205,7 +231,7 @@ socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
       instance.refresh_node(destinatedNode);
       destinatedNode = null;
     }
- }
+  }
 });
 
 // New socket handler for bulk processing progress
@@ -214,15 +240,46 @@ socketio.on(SOCKET_TOPIC_BULK_PROGRESS, (data) => {
   updateBulkProgress(data);
 });
 
+// New function to process next file in queue
+async function processNextInQueue() {
+  if(isProcessingQueue || fileQueue.length === 0) return;
+  
+  isProcessingQueue = true;
+  
+  try {
+    const nextFile = fileQueue.shift();
+    if(nextFile) {
+      const { node, destinationNode } = nextFile;
+      
+      try {
+        let upgradeInfo = await upgradeFileToFolder(node.id, destinationNode.id);
+        workitemList.push(upgradeInfo.workItemId);
+        addGroupListItem(node.text, upgradeInfo.workItemStatus, ItemType.FILE, 
+                        'list-group-item-info', upgradeInfo.workItemId);
+      } catch (err) {
+        addGroupListItem(node.text, 'failed', ItemType.FILE, 'list-group-item-danger');
+        totalFilesProcessed++;
+        
+        // Try next file even if this one failed
+        if(fileQueue.length > 0) {
+          setTimeout(() => processNextInQueue(), 100);
+        }
+      }
+    }
+  } finally {
+    isProcessingQueue = false;
+  }
+}
+
 // New bulk processing function
 async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
   try {
     bulkProcessingActive = true;
     
-    // Extract folder and project IDs from the destination node
-    const destinationParams = destinationNode.id.split('/');
-    const folderId = destinationParams[destinationParams.length - 1];
-    const projectId = destinationParams[destinationParams.length - 3];
+    // Extract IDs from the source node instead of destination
+    const sourceParams = sourceNode.id.split('/');
+    const sourceFolderId = sourceParams[sourceParams.length - 1];
+    const projectId = sourceParams[sourceParams.length - 3];
 
     // Create file filter based on supported file types
     const supportedTypes = [];
@@ -232,12 +289,23 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
 
     console.log('Starting bulk processing:', {
       projectId: projectId,
-      folderId: folderId,
+      folderId: sourceFolderId,  // Use source folder ID
       targetVersion: targetVersion,
       supportedTypes: supportedTypes
     });
 
-    // Start bulk processing - FIXED payload structure
+    // Clear the log and show initial status
+    const logList = document.getElementById('logStatus');
+    logList.innerHTML = '';
+    
+    addGroupListItem(
+      'Bulk Processing', 
+      'Initializing...', 
+      ItemType.FOLDER, 
+      'list-group-item-info'
+    );
+
+    // Start bulk processing with the source folder
     const response = await jQuery.ajax({
       url: '/api/aps/da4revit/v1/upgrader/bulk',
       method: 'POST',
@@ -245,20 +313,48 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
       dataType: 'json',
       data: JSON.stringify({
         projectId: projectId,
-        folderId: folderId,
+        folderId: sourceFolderId,  // Send source folder ID
         targetVersion: targetVersion,
-        supportedTypes: supportedTypes  // This matches backend expectation
+        supportedTypes: supportedTypes
       })
     });
 
     if (response.success) {
       currentBatchId = response.batchId;
-      addGroupListItem(`Bulk Processing Started`, `Processing ${response.totalFiles} files`, ItemType.FOLDER, 'list-group-item-info', currentBatchId);
       
-      // Start progress monitoring
-      startBulkProgressMonitoring();
+      // Update the initial status
+      const entries = Array.from(logList.children);
+      if (entries.length > 0) {
+        entries[0].className = 'list-group-item list-group-item-success';
+        const label = entries[0].querySelector('label');
+        if (label) {
+          label.textContent = `, Processing ${response.totalFiles} files`;
+        }
+      }
       
-      document.getElementById('upgradeTitle').innerHTML = `<h4>🔄 Processing ${response.totalFiles} files...</h4>`;
+      // Show file list
+      if (response.files && response.files.length > 0) {
+        response.files.forEach((fileName, index) => {
+          if (index < 10) { // Show first 10 files
+            addGroupListItem(fileName, 'QUEUED', ItemType.FILE, 'list-group-item-warning');
+          }
+        });
+        
+        if (response.files.length > 10) {
+          addGroupListItem(
+            `... and ${response.files.length - 10} more files`, 
+            'QUEUED', 
+            ItemType.FOLDER, 
+            'list-group-item-warning'
+          );
+        }
+      }
+      
+      document.getElementById('upgradeTitle').innerHTML = 
+        `<h4>🚀 Bulk Processing Started - ${response.totalFiles} files queued</h4>`;
+      
+      // No need for manual progress monitoring - the WebSocket will handle it
+      
     } else {
       throw new Error(response.error || 'Failed to start bulk processing');
     }
@@ -266,10 +362,12 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
   } catch (error) {
     console.error('Bulk processing error:', error);
     
-    // Enhanced error reporting
     let errorMessage = 'Unknown error';
     if (error.responseJSON && error.responseJSON.error) {
       errorMessage = error.responseJSON.error;
+      if (error.responseJSON.supportedExtensions) {
+        errorMessage += ` (Supported: ${error.responseJSON.supportedExtensions.join(', ')})`;
+      }
     } else if (error.message) {
       errorMessage = error.message;
     } else if (error.statusText) {
@@ -281,7 +379,7 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
     let upgradeBtnElm = document.getElementById('upgradeBtn');
     upgradeBtnElm.disabled = false;
     bulkProcessingActive = false;
-    document.getElementById('upgradeTitle').innerHTML = "<h4>❌ Bulk Processing Failed</h4>";
+    document.getElementById('upgradeTitle').innerHTML = `<h4>❌ Bulk Processing Failed: ${errorMessage}</h4>`;
   }
 }
 
@@ -352,28 +450,89 @@ function updateBulkProgress(data) {
 
 // Update bulk file list in UI
 function updateBulkFileList(files) {
-  // Clear existing file entries (keep the bulk processing entry)
   const logList = document.getElementById('logStatus');
-  const entries = Array.from(logList.children);
   
-  // Remove individual file entries but keep folder entries
+  // Clear existing file entries but keep the bulk processing header
+  const entries = Array.from(logList.children);
   entries.forEach(entry => {
-    if (entry.textContent.includes('File:') && !entry.textContent.includes('Bulk Processing')) {
+    if (entry.textContent.includes('File:') && 
+        !entry.textContent.includes('Bulk Processing Started')) {
       entry.remove();
     }
   });
 
-  // Add current file statuses
-  files.slice(0, 10).forEach(file => { // Show only first 10 files to avoid UI clutter
-    const statusClass = getStatusClass(file.status);
-    addGroupListItem(file.name, file.status.toUpperCase(), ItemType.FILE, statusClass, file.workItemId);
+  // Group files by status for better organization
+  const filesByStatus = {
+    completed: files.filter(f => f.status === 'completed'),
+    processing: files.filter(f => f.status === 'processing' || f.status === 'submitted'),
+    queued: files.filter(f => f.status === 'queued'),
+    failed: files.filter(f => f.status === 'failed')
+  };
+
+  // Show processing files first (limited to 5 for UI clarity)
+  filesByStatus.processing.slice(0, 5).forEach(file => {
+    const statusText = file.status === 'submitted' ? 'SUBMITTED TO DA' : 'PROCESSING';
+    addBulkFileStatus(file.name, statusText, 'list-group-item-info', file.workItemId);
   });
 
-  // Add summary if more than 10 files
-  if (files.length > 10) {
-    addGroupListItem(`... and ${files.length - 10} more files`, 'Processing', ItemType.FOLDER, 'list-group-item-info');
+  // Show recently completed files (limited to 5)
+  filesByStatus.completed.slice(0, 5).forEach(file => {
+    addBulkFileStatus(file.name, 'COMPLETED', 'list-group-item-success', file.workItemId);
+  });
+
+  // Show failed files (all of them, as these are important)
+  filesByStatus.failed.forEach(file => {
+    const errorText = file.error ? `FAILED: ${file.error}` : 'FAILED';
+    addBulkFileStatus(file.name, errorText, 'list-group-item-danger', file.workItemId);
+  });
+
+  // Show queued files count if any
+  if (filesByStatus.queued.length > 0) {
+    addGroupListItem(
+      `${filesByStatus.queued.length} files waiting in queue`, 
+      'QUEUED', 
+      ItemType.FOLDER, 
+      'list-group-item-warning'
+    );
+  }
+
+  // Add summary if there are many files
+  const totalShown = Math.min(5, filesByStatus.processing.length) + 
+                    Math.min(5, filesByStatus.completed.length) + 
+                    filesByStatus.failed.length;
+  const totalFiles = files.length;
+  
+  if (totalShown < totalFiles) {
+    addGroupListItem(
+      `... and ${totalFiles - totalShown} more files`, 
+      'Various statuses', 
+      ItemType.FOLDER, 
+      'list-group-item-info'
+    );
   }
 }
+
+function addBulkFileStatus(fileName, status, cssClass, workItemId) {
+  const logList = document.getElementById('logStatus');
+  
+  // Check if this file already has an entry
+  const existingEntry = Array.from(logList.children).find(entry => 
+    entry.textContent.includes(`File:${fileName}`)
+  );
+  
+  if (existingEntry) {
+    // Update existing entry
+    existingEntry.className = 'list-group-item ' + cssClass;
+    const label = existingEntry.querySelector('label');
+    if (label) {
+      label.textContent = `, status: ${status}`;
+    }
+  } else {
+    // Create new entry
+    addGroupListItem(fileName, status, ItemType.FILE, cssClass, workItemId);
+  }
+}
+
 
 // Get CSS class for file status
 function getStatusClass(status) {
@@ -391,6 +550,9 @@ function finishBulkProcessing(finalStatus) {
   bulkProcessingActive = false;
   currentBatchId = null;
   
+  // Stop any progress monitoring
+  stopBulkProgressMonitoring();
+  
   let upgradeBtnElm = document.getElementById('upgradeBtn');
   upgradeBtnElm.disabled = false;
   
@@ -398,23 +560,47 @@ function finishBulkProcessing(finalStatus) {
   const failedCount = finalStatus.failedFiles || 0;
   const totalCount = finalStatus.totalFiles || 0;
   
-  if (failedCount === 0) {
-    document.getElementById('upgradeTitle').innerHTML = `<h4>🎉 Bulk Processing Completed Successfully! (${successCount}/${totalCount} files)</h4>`;
+  // Show final status
+  let statusMessage;
+  let statusIcon;
+  
+  if (failedCount === 0 && successCount === totalCount) {
+    statusMessage = `Bulk Processing Completed Successfully!`;
+    statusIcon = '🎉';
+  } else if (successCount === 0) {
+    statusMessage = `Bulk Processing Failed - All files failed`;
+    statusIcon = '❌';
   } else {
-    document.getElementById('upgradeTitle').innerHTML = `<h4>⚠️ Bulk Processing Completed with ${failedCount} failures (${successCount}/${totalCount} files)</h4>`;
+    statusMessage = `Bulk Processing Completed with Issues`;
+    statusIcon = '⚠️';
   }
+  
+  document.getElementById('upgradeTitle').innerHTML = `
+    <h4>${statusIcon} ${statusMessage}</h4>
+    <div style="margin-top: 10px;">
+      <strong>Final Results:</strong><br>
+      ✅ Successfully processed: ${successCount} files<br>
+      ❌ Failed: ${failedCount} files<br>
+      📁 Total: ${totalCount} files
+    </div>
+  `;
 
-  // Refresh tree nodes
-  if(sourceNode !== null){
-    let instance = $('#sourceHubs').jstree(true);
-    instance.refresh_node(sourceNode);
-    sourceNode = null;
-  }
-  if(destinatedNode !== null ){
-    let instance = $('#destinationHubs').jstree(true);
-    instance.refresh_node(destinatedNode);
-    destinatedNode = null;
-  }
+  // Clear queue status
+  document.getElementById('queueStatus').innerHTML = '';
+
+  // Refresh tree nodes after a short delay
+  setTimeout(() => {
+    if(sourceNode !== null){
+      let instance = $('#sourceHubs').jstree(true);
+      instance.refresh_node(sourceNode);
+      sourceNode = null;
+    }
+    if(destinatedNode !== null ){
+      let instance = $('#destinationHubs').jstree(true);
+      instance.refresh_node(destinatedNode);
+      destinatedNode = null;
+    }
+  }, 1000);
 }
 
 // Original folder upgrade function (kept for legacy mode)
@@ -425,10 +611,16 @@ async function upgradeFolder(sourceNode, destinationNode) {
   if (destinationNode === null || destinationNode.type !== 'folders')
     return false;
 
+  // Reset file queue for this folder
+  fileQueue = [];
+  
   let instance = $("#sourceHubs").jstree(true);
   instance.open_node(sourceNode, async function(e, data){
     let childrenDom = e.children;
-
+    
+    // First, collect all files that need processing
+    let filesToProcess = [];
+    
     for (let i = 0; i < childrenDom.length; i++) {
       let nodeDom = childrenDom[i];
       let node = instance.get_json(nodeDom);
@@ -436,40 +628,81 @@ async function upgradeFolder(sourceNode, destinationNode) {
       if (node.type === 'folders') {
         let destinatedSubFolder = null;
         try {
-          destinatedSubFolder = await createNamedFolder(destinationNode, node.text)
-          addGroupListItem(node.text, 'created', ItemType.FOLDER, 'active' )
+          destinatedSubFolder = await createNamedFolder(destinationNode, node.text);
+          addGroupListItem(node.text, 'created', ItemType.FOLDER, 'active');
         } catch (err) {
-          addGroupListItem(node.text, 'failed', ItemType.FOLDER, 'list-group-item-danger' )
+          addGroupListItem(node.text, 'failed', ItemType.FOLDER, 'list-group-item-danger');
         }
         try{
           await upgradeFolder(node, destinatedSubFolder);
         }catch(err){
-          addGroupListItem(node.text,'failed', ItemType.FOLDER, 'list-group-item-danger' )
+          addGroupListItem(node.text,'failed', ItemType.FOLDER, 'list-group-item-danger');
         }
       }
+      
       if (node.type === 'items') {
-        const fileParts     = node.text.split('.');
+        const fileParts = node.text.split('.');
         const fileExtension = fileParts[fileParts.length-1].toLowerCase();
+        
         if ((bSupportRvt && fileExtension === 'rvt') ||
-          (bSupportRfa && fileExtension === 'rfa') ||
-          (bSupportRte && fileExtension === 'rte')) {
-          if (fileNumber++ >= FileLimitation) {
-            addGroupListItem('File Limit Reached', `Only ${FileLimitation} files processed. Enable Bulk Processing for unlimited files.`, ItemType.FOLDER, 'list-group-item-warning');
-            return;
-          }
-          try {
-            let upgradeInfo = await upgradeFileToFolder(node.id, destinationNode.id);
-            workitemList.push(upgradeInfo.workItemId);
-            addGroupListItem(node.text, upgradeInfo.workItemStatus, ItemType.FILE, 'list-group-item-info', upgradeInfo.workItemId);
-          } catch (err) {
-            addGroupListItem(node.text, 'failed', ItemType.FILE, 'list-group-item-danger');
-          }
+            (bSupportRfa && fileExtension === 'rfa') ||
+            (bSupportRte && fileExtension === 'rte')) {
+          filesToProcess.push({ node, destinationNode });
         }
       }
     }
-  
+    
+    // Update UI with total files found
+    if(filesToProcess.length > 0) {
+      document.getElementById('upgradeTitle').innerHTML = 
+        `<h4>Starting upgrade of ${filesToProcess.length} Revit files (Processing ${Math.min(FileLimitation, filesToProcess.length)} at a time)...</h4>`;
+    }
+    
+    // Process files with queue management
+    for(let i = 0; i < filesToProcess.length; i++) {
+      if(i < FileLimitation) {
+        // Process first batch immediately
+        const { node, destinationNode } = filesToProcess[i];
+        try {
+          let upgradeInfo = await upgradeFileToFolder(node.id, destinationNode.id);
+          workitemList.push(upgradeInfo.workItemId);
+          addGroupListItem(node.text, upgradeInfo.workItemStatus, ItemType.FILE, 
+                          'list-group-item-info', upgradeInfo.workItemId);
+          fileNumber++;
+        } catch (err) {
+          addGroupListItem(node.text, 'failed', ItemType.FILE, 'list-group-item-danger');
+          totalFilesProcessed++;
+        }
+      } else {
+        // Add remaining files to queue
+        fileQueue.push(filesToProcess[i]);
+      }
+    }
+    
+    // Update UI to show queue status
+    if(fileQueue.length > 0) {
+      console.log(`${fileQueue.length} files queued for processing`);
+    }
   }, true);
-};
+}
+
+function updateQueueStatus() {
+  const activeCount = workitemList.length;
+  const queuedCount = fileQueue.length;
+  const processedCount = totalFilesProcessed;
+  
+  let statusText = `Processing: ${activeCount} active`;
+  if(queuedCount > 0) {
+    statusText += `, ${queuedCount} queued`;
+  }
+  statusText += `, ${processedCount} completed`;
+  
+  // You can add a status element to show this
+  const statusElement = document.getElementById('queueStatus');
+  if(statusElement) {
+    statusElement.textContent = statusText;
+  }
+}
 
 // Cancel bulk processing function
 async function cancelBulkProcessing() {

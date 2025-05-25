@@ -52,8 +52,10 @@ class BulkProcessingQueue {
         this.processing = new Map(); // Track currently processing items
         this.completed = new Map();  // Track completed items
         this.failed = new Map();     // Track failed items
-        this.maxConcurrent = 5;      // Max concurrent workitems (adjust based on your DA limits)
+        this.maxConcurrent = 5;      // Max concurrent workitems
         this.batchId = 0;           // Unique identifier for bulk operations
+        this.pendingFiles = [];     // Files waiting to be processed
+        this.isProcessing = false;  // Flag to prevent concurrent processing
     }
 
     // Add files to processing queue
@@ -72,7 +74,8 @@ class BulkProcessingQueue {
             createdAt: new Date(),
             totalFiles: files.length,
             completedFiles: 0,
-            failedFiles: 0
+            failedFiles: 0,
+            submittedFiles: 0  // Track files submitted to DA
         };
 
         this.queue.push(bulkJob);
@@ -84,80 +87,151 @@ class BulkProcessingQueue {
         return batchId;
     }
 
-    // Process the queue
+    // Main queue processor
     async processQueue() {
-        if (this.queue.length === 0) return;
+        if (this.isProcessing || this.queue.length === 0) return;
+        
+        this.isProcessing = true;
 
-        // Process jobs one by one
-        while (this.queue.length > 0) {
-            const currentJob = this.queue[0];
-            
-            // Send initial progress
-            this.emitProgress(currentJob);
-            
-            await this.processBulkJob(currentJob);
-            
-            // Remove completed job from queue
-            this.queue.shift();
-            
-            // Final progress update
-            this.emitProgress(currentJob, true);
+        try {
+            while (this.queue.length > 0) {
+                const currentJob = this.queue[0];
+                
+                // Send initial progress
+                this.emitProgress(currentJob);
+                
+                await this.processBulkJob(currentJob);
+                
+                // Remove completed job from queue
+                this.queue.shift();
+                
+                // Final progress update
+                this.emitProgress(currentJob, true);
+            }
+        } finally {
+            this.isProcessing = false;
         }
     }
 
-    // Process a single bulk job
+    // Process a single bulk job with proper queue management
     async processBulkJob(bulkJob) {
         console.log(`Processing bulk job ${bulkJob.batchId} with ${bulkJob.totalFiles} files`);
         
-        const pendingFiles = bulkJob.files.filter(f => f.status === 'queued');
+        // Initialize pending files list
+        this.pendingFiles = [...bulkJob.files];
         
-        while (pendingFiles.length > 0) {
-            // Get files we can process (up to maxConcurrent)
-            const availableSlots = this.maxConcurrent - this.processing.size;
-            if (availableSlots <= 0) {
-                // Wait for some to complete
-                await this.waitForSlot();
-                continue;
-            }
-
-            // Take files for this batch
-            const filesToProcess = pendingFiles.splice(0, Math.min(availableSlots, pendingFiles.length));
+        // Process files until all are done or permanently failed
+        while (this.pendingFiles.length > 0 || this.processing.size > 0) {
+            // Process available slots
+            await this.fillAvailableSlots(bulkJob);
             
-            // Start processing these files
-            const processingPromises = filesToProcess.map(file => 
-                this.processFile(file, bulkJob.options)
-                    .then(result => this.handleFileComplete(file, bulkJob, result))
-                    .catch(error => this.handleFileError(file, bulkJob, error))
-            );
-
-            // Don't wait for completion, continue processing more
-            Promise.allSettled(processingPromises);
+            // Wait a bit before checking again
+            await this.sleep(2000);
             
             // Update progress
             this.emitProgress(bulkJob);
-            
-            // Brief pause to avoid overwhelming the API
-            await this.sleep(1000);
+        }
+        
+        console.log(`Bulk job ${bulkJob.batchId} completed: ${bulkJob.completedFiles} success, ${bulkJob.failedFiles} failed`);
+    }
+
+    // Fill available processing slots
+    async fillAvailableSlots(bulkJob) {
+        const availableSlots = this.maxConcurrent - this.processing.size;
+        
+        if (availableSlots <= 0 || this.pendingFiles.length === 0) {
+            return; // No slots available or no files to process
         }
 
-        // Wait for all files in this job to complete
-        while (bulkJob.completedFiles + bulkJob.failedFiles < bulkJob.totalFiles) {
-            await this.sleep(2000);
-            this.emitProgress(bulkJob);
+        // Take files for available slots
+        const filesToProcess = this.pendingFiles.splice(0, availableSlots);
+        
+        // Process each file
+        for (const file of filesToProcess) {
+            this.processFileAsync(file, bulkJob);
         }
     }
 
-    // Process a single file
-    async processFile(file, options) {
-        file.status = 'processing';
-        file.attempts++;
-        
+    // Process file asynchronously (fire and forget)
+    async processFileAsync(file, bulkJob) {
         const processingKey = `${file.fileItemId}_${Date.now()}`;
-        this.processing.set(processingKey, file);
-
+        
         try {
-            console.log(`Processing file: ${file.fileItemName} (attempt ${file.attempts})`);
+            // Mark as processing
+            file.status = 'processing';
+            file.attempts++;
+            this.processing.set(processingKey, file);
             
+            console.log(`Submitting file to DA: ${file.fileItemName} (attempt ${file.attempts})`);
+            
+            // Submit to Design Automation
+            const result = await this.submitToDesignAutomation(file, bulkJob.options);
+            
+            if (result.success) {
+                // File submitted successfully - it will complete via webhook
+                file.workItemId = result.workItemId;
+                file.status = 'submitted';
+                bulkJob.submittedFiles++;
+                
+                // Store workitem info for webhook callback
+                if (!global.bulkJobWorkitems) {
+                    global.bulkJobWorkitems = new Map();
+                }
+                global.bulkJobWorkitems.set(result.workItemId, {
+                    bulkJob,
+                    file,
+                    processingKey
+                });
+                
+                console.log(`File submitted to DA: ${file.fileItemName}, workitem: ${result.workItemId}`);
+            } else {
+                throw new Error(result.error || 'Failed to submit to DA');
+            }
+            
+        } catch (error) {
+            console.error(`Error processing ${file.fileItemName}:`, error.message);
+            
+            // Check if we should retry
+            if (this.shouldRetry(error, file)) {
+                // Put back in pending queue for retry
+                file.status = 'queued';
+                this.pendingFiles.push(file);
+                console.log(`File ${file.fileItemName} queued for retry (${file.maxAttempts - file.attempts} attempts left)`);
+            } else {
+                // Permanent failure
+                this.handleFileFailed(file, bulkJob, error);
+            }
+            
+            // Remove from processing
+            this.processing.delete(processingKey);
+        }
+    }
+
+    // Check if error is retryable
+    shouldRetry(error, file) {
+        // Check if we have attempts left
+        if (file.attempts >= file.maxAttempts) {
+            return false;
+        }
+        
+        // Check error type
+        const errorMessage = error.message || '';
+        const retryableErrors = [
+            'Maximum concurrent workitems reached',
+            'Rate limit exceeded',
+            'quota exceeded',
+            'ETIMEDOUT',
+            'ECONNRESET'
+        ];
+        
+        return retryableErrors.some(retryable => 
+            errorMessage.toLowerCase().includes(retryable.toLowerCase())
+        );
+    }
+
+    // Submit file to Design Automation
+    async submitToDesignAutomation(file, options) {
+        try {
             // Get file information
             const params = file.fileItemId.split('/');
             const resourceId = params[params.length - 1];
@@ -176,8 +250,7 @@ class BulkProcessingQueue {
             );
 
             const versionInfo = await getLatestVersionInfo(projectId, resourceId, options.oauth_client, options.oauth_token);
-            const inputStorageId = versionInfo.versionStorageId;
-
+            
             const createVersionBody = createBodyOfPostVersion(
                 resourceId,
                 file.fileItemName, 
@@ -186,29 +259,37 @@ class BulkProcessingQueue {
                 options.targetVersion
             );
 
-            // Ensure correct type for version creation
-            if (createVersionBody.data.type !== "versions") {
-                createVersionBody.data.type = "versions";
-            }
-
             // Get file extension
-            const fileNameParts = file.fileItemName.split('.');
-            const fileExtension = fileNameParts[fileNameParts.length-1].toLowerCase();
+            const fileExtension = file.fileItemName.split('.').pop().toLowerCase();
 
             // Submit to Design Automation
             const upgradeRes = await upgradeFile(
-                inputStorageId, 
+                versionInfo.versionStorageId, 
                 storageInfo.StorageId, 
                 projectId, 
                 createVersionBody, 
                 fileExtension, 
                 options.oauth_token, 
                 options.oauth_token_2legged,
-                true // isNewVersion = true
+                true // isNewVersion
             );
 
-            this.processing.delete(processingKey);
+            // CRITICAL: Store the version creation data with the workitem info
+            if (!global.bulkJobWorkitems) {
+                global.bulkJobWorkitems = new Map();
+            }
             
+            // Store all necessary data for the webhook callback
+            global.bulkJobWorkitems.set(upgradeRes.body.id, {
+                bulkJob: this.queue[0], // Current bulk job
+                file: file,
+                processingKey: `${file.fileItemId}_${Date.now()}`,
+                createVersionData: createVersionBody,  // Store version creation data
+                projectId: projectId,
+                oauth_client: options.oauth_client,
+                oauth_token: options.oauth_token
+            });
+
             return {
                 success: true,
                 workItemId: upgradeRes.body.id,
@@ -216,51 +297,81 @@ class BulkProcessingQueue {
             };
 
         } catch (error) {
-            this.processing.delete(processingKey);
-            throw error;
+            return {
+                success: false,
+                error: error.message
+            };
         }
     }
 
-    // Handle successful file completion
-    handleFileComplete(file, bulkJob, result) {
-        file.status = 'completed';
-        file.workItemId = result.workItemId;
-        file.workItemStatus = result.workItemStatus;
-        file.completedAt = new Date();
+    // Updated fillAvailableSlots method with better tracking
+    async fillAvailableSlots(bulkJob) {
+        // Import the tracker
+        const { workitemTracker } = require('./common/da4revitImp');
         
-        bulkJob.completedFiles++;
-        this.completed.set(file.fileItemId, file);
+        const activeCount = workitemTracker.getActiveCount();
+        const availableSlots = this.maxConcurrent - activeCount;
         
-        console.log(`File completed: ${file.fileItemName} (${bulkJob.completedFiles}/${bulkJob.totalFiles})`);
+        console.log(`Fill slots: Active=${activeCount}, Available=${availableSlots}, Pending=${this.pendingFiles.length}`);
+        
+        if (availableSlots <= 0 || this.pendingFiles.length === 0) {
+            return; // No slots available or no files to process
+        }
+
+        // Take files for available slots
+        const filesToProcess = this.pendingFiles.splice(0, availableSlots);
+        
+        // Process each file
+        for (const file of filesToProcess) {
+            this.processFileAsync(file, bulkJob);
+        }
     }
 
-    // Handle file processing error
-    async handleFileError(file, bulkJob, error) {
-        console.log(`File processing error: ${file.fileItemName}`, error.message);
-        
-        if (file.attempts < file.maxAttempts) {
-            // Retry after delay
-            file.status = 'queued';
-            await this.sleep(5000); // Wait 5 seconds before retry
+    // Updated handleFileCompleted to trigger processing of pending files
+    handleFileCompleted(workItemId) {
+        const workitemInfo = global.bulkJobWorkitems?.get(workItemId);
+        if (!workitemInfo) {
+            console.log(`No bulk job info found for workitem ${workItemId}`);
             return;
         }
+
+        const { bulkJob, file, processingKey } = workitemInfo;
         
-        // Max attempts reached
+        // Update file status
+        file.status = 'completed';
+        file.completedAt = new Date();
+        
+        // Update job counters
+        bulkJob.completedFiles++;
+        
+        // Move to completed
+        this.completed.set(file.fileItemId, file);
+        this.processing.delete(processingKey);
+        
+        // Clean up
+        global.bulkJobWorkitems.delete(workItemId);
+        
+        console.log(`File completed: ${file.fileItemName} (${bulkJob.completedFiles}/${bulkJob.totalFiles})`);
+        
+        // Emit progress update
+        this.emitProgress(bulkJob);
+        
+        // CRITICAL: Try to process more files if available
+        setTimeout(() => {
+            this.fillAvailableSlots(bulkJob);
+        }, 1000); // Small delay to ensure tracker is updated
+    }
+
+    // Handle file failure (called from webhook or processing error)
+    handleFileFailed(file, bulkJob, error) {
         file.status = 'failed';
-        file.error = error.message;
+        file.error = error.message || 'Unknown error';
         file.failedAt = new Date();
         
         bulkJob.failedFiles++;
         this.failed.set(file.fileItemId, file);
         
-        console.log(`File failed permanently: ${file.fileItemName}`);
-    }
-
-    // Wait for processing slot to become available
-    async waitForSlot() {
-        while (this.processing.size >= this.maxConcurrent) {
-            await this.sleep(2000);
-        }
+        console.log(`File failed permanently: ${file.fileItemName} - ${file.error}`);
     }
 
     // Emit progress updates via WebSocket
@@ -271,8 +382,10 @@ class BulkProcessingQueue {
             completedFiles: bulkJob.completedFiles,
             failedFiles: bulkJob.failedFiles,
             processingFiles: this.processing.size,
-            queuedFiles: bulkJob.files.filter(f => f.status === 'queued').length,
+            queuedFiles: this.pendingFiles.length,
+            submittedFiles: bulkJob.submittedFiles,
             isComplete,
+            percentComplete: Math.round((bulkJob.completedFiles + bulkJob.failedFiles) / bulkJob.totalFiles * 100),
             files: bulkJob.files.map(f => ({
                 name: f.fileItemName,
                 status: f.status,
@@ -303,10 +416,41 @@ class BulkProcessingQueue {
             totalFiles: job.totalFiles,
             completedFiles: job.completedFiles,
             failedFiles: job.failedFiles,
-            processingFiles: job.files.filter(f => f.status === 'processing').length,
-            queuedFiles: job.files.filter(f => f.status === 'queued').length,
+            processingFiles: this.processing.size,
+            queuedFiles: this.pendingFiles.length,
+            submittedFiles: job.submittedFiles,
+            percentComplete: Math.round((job.completedFiles + job.failedFiles) / job.totalFiles * 100),
             files: job.files
         };
+    }
+
+    // Cancel bulk job
+    async cancelJob(batchId, oauth_token) {
+        const jobIndex = this.queue.findIndex(j => j.batchId === batchId);
+        if (jobIndex === -1) return false;
+        
+        const job = this.queue[jobIndex];
+        
+        // Cancel active workitems
+        const cancelPromises = [];
+        for (const [workItemId, info] of (global.bulkJobWorkitems || new Map()).entries()) {
+            if (info.bulkJob.batchId === batchId) {
+                cancelPromises.push(
+                    cancelWorkitem(workItemId, oauth_token)
+                        .catch(err => console.log(`Failed to cancel workitem ${workItemId}:`, err))
+                );
+            }
+        }
+        
+        await Promise.allSettled(cancelPromises);
+        
+        // Clear pending files
+        this.pendingFiles = [];
+        
+        // Remove job
+        this.queue.splice(jobIndex, 1);
+        
+        return true;
     }
 }
 
@@ -714,116 +858,310 @@ router.get('/da4revit/v1/upgrader/files/:file_workitem_id', async(req, res, next
 })
 
 
+// Update the callback handler in da4revit.js
 ///////////////////////////////////////////////////////////////////////
 /// Handles the callback from Design Automation after job completion
 ///////////////////////////////////////////////////////////////////////
 router.post('/callback/designautomation', async (req, res, next) => {
-    // Acknowledge immediately
+    // Best practice is to acknowledge receipt immediately
     res.status(202).end();
-
-    const workitemId = req.body.id;
-    const status = req.body.status;
     
-    console.log(`🔔 Webhook received: ${workitemId} - ${status}`);
+    console.log(`Webhook received for workitem: ${req.body.id}, status: ${req.body.status}`);
+
+    // CRITICAL: Update the workitem tracker when webhook is received
+    const { workitemTracker } = require('./common/da4revitImp');
 
     let workitemStatus = {
-        'WorkitemId': workitemId,
+        'WorkitemId': req.body.id,
         'Status': "Processing"
     };
     
-    if (status === 'success') {
-        // Import the helper function
-        const { findWorkitemById } = require('./common/da4revitImp');
-        const workitem = findWorkitemById(workitemId);
+    // Check if this is a bulk processing workitem
+    const bulkWorkitemInfo = global.bulkJobWorkitems?.get(req.body.id);
+    
+    if (req.body.status === 'success') {
+        // Find the workitem that matches this callback
+        const workitem = workitemList.find((item) => {
+            return item.workitemId === req.body.id;
+        });
 
-        if (!workitem) {
-            console.log(`❌ Workitem ${workitemId} not found in tracking list`);
-            workitemStatus.Status = 'Failed';
-            workitemStatus.Error = 'Workitem not found';
-            global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+        if (!workitem && !bulkWorkitemInfo) {
+            console.log('The workitem: ' + req.body.id + ' to callback is not in any list');
+            // Still need to remove from tracker
+            workitemTracker.removeWorkitem(req.body.id);
             return;
         }
         
-        let index = workitemList.indexOf(workitem);
-        workitemStatus.Status = 'Success';
-        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-        
-        console.log(`🔄 Processing workitem: ${workitem.workitemId}`);
-
-        try {
-            // Reconstruct OAuth session
-            const oauth = new OAuth();
-            oauth._session = {
-                internal_token: workitem.access_token_3Legged.access_token,
-                refresh_token: workitem.access_token_3Legged.refresh_token,
-                expires_at: workitem.access_token_3Legged.expires_at
-            };
-            
-            const credentials = await oauth.getInternalToken();
-            if (!credentials) {
-                throw new Error('Failed to get credentials');
-            }
-            
-            const oauth_client = oauth.getClient();
-            
-            // Create new version (this is the core functionality)
-            let result = null;
-            const isVersionOperation = workitem.isNewVersion || 
-                (workitem.createVersionData?.data?.type === 'versions');
-            
-            if (isVersionOperation) {
-                console.log('✅ Creating new VERSION');
-                const versions = new VersionsApi();
-                
-                // Ensure correct type
-                if (workitem.createVersionData.data.type !== 'versions') {
-                    workitem.createVersionData.data.type = 'versions';
+        // Add a small delay to ensure DA has finished uploading the output file
+        setTimeout(async () => {
+            try {
+                // Handle bulk processing workitem
+                if (bulkWorkitemInfo) {
+                    const { bulkJob, file } = bulkWorkitemInfo;
+                    
+                    console.log(`Processing bulk workitem callback for file: ${file.fileItemName}`);
+                    
+                    // Get the stored version creation data
+                    const workitemData = workitemTracker.getWorkitem(req.body.id);
+                    if (!workitemData || !workitemData.createVersionData) {
+                        console.error('Missing version creation data for bulk workitem');
+                        workitemStatus.Status = 'Failed';
+                        workitemStatus.Error = 'Missing version creation data';
+                        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        
+                        // Update tracker and bulk queue
+                        workitemTracker.failWorkitem(req.body.id, 'Missing version data');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Missing version data'));
+                        return;
+                    }
+                    
+                    // Get credentials from bulk job options
+                    const credentials = bulkJob.options.oauth_token;
+                    const oauth_client = bulkJob.options.oauth_client;
+                    
+                    if (!credentials || !credentials.access_token) {
+                        console.log("No valid token available for bulk processing operation");
+                        workitemStatus.Status = 'Failed';
+                        workitemStatus.Error = 'Authentication error - missing token';
+                        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        
+                        // Update tracker and bulk queue
+                        workitemTracker.failWorkitem(req.body.id, 'Authentication error');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Authentication error'));
+                        return;
+                    }
+                    
+                    // CRITICAL: Actually create the version in BIM360/ACC
+                    console.log("Creating new version in BIM360/ACC for bulk processed file");
+                    console.log(`Project ID: ${workitemData.projectId}`);
+                    console.log(`Version data type: ${workitemData.createVersionData.data.type}`);
+                    
+                    let version = null;
+                    let retries = 3;
+                    let lastError = null;
+                    
+                    while (retries > 0 && !version) {
+                        try {
+                            if (workitemData.createVersionData.data.type === 'versions') {
+                                const versions = new VersionsApi();
+                                version = await versions.postVersion(
+                                    workitemData.projectId, 
+                                    workitemData.createVersionData, 
+                                    oauth_client, 
+                                    credentials
+                                );
+                            } else {
+                                const items = new ItemsApi();
+                                version = await items.postItem(
+                                    workitemData.projectId, 
+                                    workitemData.createVersionData, 
+                                    oauth_client, 
+                                    credentials
+                                );
+                            }
+                            
+                            if (version && version.statusCode === 201) {
+                                console.log(`Successfully created version for ${file.fileItemName}`);
+                                break; // Success
+                            }
+                        } catch (err) {
+                            lastError = err;
+                            retries--;
+                            
+                            if (retries > 0) {
+                                console.log(`Retry ${3 - retries}/3 after error:`, err.message);
+                                await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
+                            }
+                        }
+                    }
+                    
+                    if (version && version.statusCode === 201) {
+                        console.log('Successfully created a new version of the file');
+                        workitemStatus.Status = 'Completed';
+                        
+                        // Update tracker
+                        workitemTracker.completeWorkitem(req.body.id, 'success');
+                        
+                        // Update bulk queue
+                        bulkQueue.handleFileCompleted(req.body.id);
+                        
+                        // Emit completion status
+                        setTimeout(() => {
+                            global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        }, 100);
+                    } else {
+                        throw lastError || new Error('Failed to create version after retries');
+                    }
+                    
+                } else {
+                    // Handle regular (non-bulk) workitem
+                    const type = workitem.createVersionData.data.type;
+                    const credentials = workitem.access_token_3Legged;
+                    
+                    if (!credentials || !credentials.access_token) {
+                        console.log("No valid token available in workitem for BIM360/ACC operation");
+                        workitemStatus.Status = 'Failed';
+                        workitemStatus.Error = 'Authentication error - missing token';
+                        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        
+                        // Update tracker
+                        workitemTracker.failWorkitem(req.body.id, 'Authentication error');
+                        removeWorkitemFromList(workitem);
+                        return;
+                    }
+                    
+                    console.log("Using token from workitem for BIM360 operation");
+                    console.log(`Creating ${type === "versions" ? "new version" : "new item"} in BIM360/ACC`);
+                    console.log(`Project ID: ${workitem.projectId}`);
+                    
+                    // Regular version creation logic (same as before)
+                    let version = null;
+                    let retries = 3;
+                    let lastError = null;
+                    
+                    while (retries > 0 && !version) {
+                        try {
+                            const oauth = new OAuth();
+                            const oauth_client = oauth.getClient();
+                            
+                            if (type === "versions") {
+                                const versions = new VersionsApi();
+                                version = await versions.postVersion(
+                                    workitem.projectId, 
+                                    workitem.createVersionData, 
+                                    oauth_client, 
+                                    credentials
+                                );
+                            } else {
+                                const items = new ItemsApi();
+                                version = await items.postItem(
+                                    workitem.projectId, 
+                                    workitem.createVersionData, 
+                                    oauth_client, 
+                                    credentials
+                                );
+                            }
+                            
+                            if (version && version.statusCode === 201) {
+                                break; // Success
+                            }
+                        } catch (err) {
+                            lastError = err;
+                            retries--;
+                            
+                            if (retries > 0) {
+                                console.log(`Retry ${3 - retries}/3 after error:`, err.message);
+                                await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
+                            }
+                        }
+                    }
+                    
+                    if (version && version.statusCode === 201) {
+                        console.log('Successfully created a new version of the file');
+                        workitemStatus.Status = 'Completed';
+                        
+                        // Update tracker
+                        workitemTracker.completeWorkitem(req.body.id, 'success');
+                        
+                        setTimeout(() => {
+                            global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        }, 100);
+                    } else {
+                        throw lastError || new Error('Failed to create version after retries');
+                    }
                 }
                 
-                result = await versions.postVersion(
-                    workitem.projectId,
-                    workitem.createVersionData,
-                    oauth_client,
-                    credentials
-                );
-            } else {
-                console.log('✅ Creating new ITEM');
-                const items = new ItemsApi();
-                result = await items.postItem(
-                    workitem.projectId,
-                    workitem.createVersionData,
-                    oauth_client,
-                    credentials
-                );
+            } catch (err) {
+                console.log('Error details:', err);
+                
+                // Enhanced error logging
+                if (err.response) {
+                    console.log('Response status:', err.response.status);
+                    if (err.response.data) {
+                        console.log('Response data:', JSON.stringify(err.response.data, null, 2));
+                    }
+                    
+                    if (err.response.status === 403) {
+                        workitemStatus.Error = 'Permission error - check project permissions';
+                    } else if (err.response.status === 401) {
+                        workitemStatus.Error = 'Authentication error - token expired';
+                    } else if (err.response.status === 409) {
+                        workitemStatus.Error = 'File already exists or version conflict';
+                    } else {
+                        workitemStatus.Error = `API error: ${err.response.status}`;
+                    }
+                } else {
+                    workitemStatus.Error = err.message || 'Unknown error';
+                }
+                
+                workitemStatus.Status = 'Failed';
+                global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                
+                // Update tracker
+                workitemTracker.failWorkitem(req.body.id, workitemStatus.Error);
+                
+                // Handle bulk processing failure
+                if (bulkWorkitemInfo) {
+                    bulkQueue.handleFileFailed(
+                        bulkWorkitemInfo.file, 
+                        bulkWorkitemInfo.bulkJob, 
+                        new Error(workitemStatus.Error)
+                    );
+                }
+            } finally {
+                // Remove the workitem after it's done
+                if (workitem) {
+                    removeWorkitemFromList(workitem);
+                }
+                
+                // Always ensure tracker is updated
+                if (!workitemTracker.getWorkitem(req.body.id)) {
+                    // If not already updated, remove it
+                    workitemTracker.removeWorkitem(req.body.id);
+                }
             }
-            
-            if (result && (result.statusCode === 201 || result.statusCode === 200)) {
-                console.log('🎉 Successfully created new version/item');
-                workitemStatus.Status = 'Completed';
-            } else {
-                throw new Error('API call failed');
-            }
-            
-        } catch (error) {
-            console.log('❌ Error in callback:', error.message);
-            workitemStatus.Status = 'Failed';
-            workitemStatus.Error = error.message;
-        } finally {
-            global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-            
-            // Clean up
-            if (index >= 0) {
-                workitemList.splice(index, 1);
-                console.log(`🧹 Cleaned up workitem ${workitemId}`);
+        }, 2000); // 2 second delay to handle ngrok timing
+        
+    } else {
+        // Report if Design Automation job was not successful
+        workitemStatus.Status = 'Failed';
+        workitemStatus.Error = `Design Automation process failed: ${req.body.status}`;
+        console.log('Design Automation error:', req.body);
+        
+        // Update tracker
+        workitemTracker.failWorkitem(req.body.id, workitemStatus.Error);
+        
+        // Handle bulk processing failure
+        if (bulkWorkitemInfo) {
+            bulkQueue.handleFileFailed(
+                bulkWorkitemInfo.file, 
+                bulkWorkitemInfo.bulkJob, 
+                new Error(workitemStatus.Error)
+            );
+        } else {
+            // Find and remove regular workitem
+            const workitem = workitemList.find(item => item.workitemId === req.body.id);
+            if (workitem) {
+                removeWorkitemFromList(workitem);
             }
         }
         
-    } else {
-        console.log(`❌ Design Automation failed: ${workitemId}`);
-        workitemStatus.Status = 'Failed';
-        workitemStatus.Error = `DA failed: ${status}`;
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
     }
 });
+
+// Initialize global bulk workitems map
+if (!global.bulkJobWorkitems) {
+    global.bulkJobWorkitems = new Map();
+}
+
+// Helper function to properly remove workitem from list
+function removeWorkitemFromList(workitem) {
+    const index = workitemList.findIndex(item => item.workitemId === workitem.workitemId);
+    if (index !== -1) {
+        workitemList.splice(index, 1);
+        console.log(`Removed workitem ${workitem.workitemId} from list. Remaining: ${workitemList.length}`);
+    }
+}
 
 module.exports = router;
