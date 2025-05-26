@@ -46,6 +46,7 @@ router.use(async (req, res, next) => {
 
 ///////////////////////////////////////////////////////////////////////
 /// Query the list of the engines
+/// Updated to support both 2023 and 2024 versions
 ///////////////////////////////////////////////////////////////////////
 router.get('/designautomation/engines', async(req, res, next) => {
     try {
@@ -63,11 +64,18 @@ router.get('/designautomation/engines', async(req, res, next) => {
             paginationToken = engines.paginationToken;
         }
 
+        // Updated to include both 2023 and 2024 engines
         const engineList = Allengines.filter( (engine ) => {
-            return (engine.indexOf('Revit+2023') >= 0)
-        }).sort((a, b) => (a > b ? -1 : 1));
+            return (engine.indexOf('Revit+2023') >= 0 || engine.indexOf('Revit+2024') >= 0)
+        }).sort((a, b) => {
+            // Sort to show newer versions first
+            if (a.includes('2024') && b.includes('2023')) return -1;
+            if (a.includes('2023') && b.includes('2024')) return 1;
+            return a > b ? -1 : 1;
+        });
         res.status(200).end(JSON.stringify(engineList));
     } catch (err) {
+        console.error('Error fetching engines:', err);
         res.status(500).end("error");
     }
 })
@@ -103,6 +111,7 @@ router.get('/appbundles', async(req, res, next) => {
 
 ///////////////////////////////////////////////////////////////////////
 /// Create|Update Appbundle version
+/// Updated to handle both 2023 and 2024 engines
 ///////////////////////////////////////////////////////////////////////
 router.post('/designautomation/appbundles', async( req, res, next) => {
     const fileName = req.body.fileName;
@@ -115,6 +124,12 @@ router.post('/designautomation/appbundles', async( req, res, next) => {
     const localAppPath = APP_BUNDLE_FOLDER + zipFileName;
     if (!fs.existsSync(localAppPath)) {
         res.status(400).end(localAppPath + " is not existing");
+        return;
+    }
+
+    // Validate engine version
+    if (!engineName || (!engineName.includes('2023') && !engineName.includes('2024'))) {
+        res.status(400).end("Invalid engine version. Only Revit 2023 and 2024 are supported.");
         return;
     }
 
@@ -137,7 +152,7 @@ router.post('/designautomation/appbundles', async( req, res, next) => {
         try{
             const appBundleSpec = {
                 "Engine" : engineName,
-                "Description" : "Create window family appbundle",
+                "Description" : `Upgrade Revit files appbundle for ${engineName}`,
             }
             const createAppVersionUrl =  designAutomation.URL.CREATE_APPBUNDLE_VERSION_URL.format(appBundleName);
             newAppVersion = await apiClientCallAsync( 'POST', createAppVersionUrl, req.oauth_token.access_token, appBundleSpec );
@@ -157,7 +172,7 @@ router.post('/designautomation/appbundles', async( req, res, next) => {
             const appBundleSpec = {
                 "Engine" : engineName,
                 "Id" : appBundleName,
-                "Description" : 'Create window family appbundle',
+                "Description" : `Upgrade Revit files appbundle for ${engineName}`,
             }
             newAppVersion = await apiClientCallAsync( 'POST', designAutomation.URL.APPBUNDLES_URL, req.oauth_token.access_token, appBundleSpec );
             const aliasSpec = {
@@ -178,7 +193,8 @@ router.post('/designautomation/appbundles', async( req, res, next) => {
         await uploadAppBundleAsync(newAppVersion.body.uploadParameters, contents);
         const result = {
             AppBundle : qualifiedAppBundleId,
-            Version   : newAppVersion.body.version
+            Version   : newAppVersion.body.version,
+            Engine    : engineName
         }
         res.status(200).end(JSON.stringify(result));    
     }catch(err){
@@ -191,6 +207,7 @@ router.post('/designautomation/appbundles', async( req, res, next) => {
 
 ///////////////////////////////////////////////////////////////////////
 /// Create activity
+/// Updated to properly handle both 2023 and 2024 engines
 ///////////////////////////////////////////////////////////////////////
 router.post('/designautomation/activities', async( req, res, next) => {
     const fileName = req.body.fileName;
@@ -198,6 +215,12 @@ router.post('/designautomation/activities', async( req, res, next) => {
 
     const appBundleName = fileName + 'AppBundle';
     const activityName = fileName + 'Activity';
+
+    // Validate engine version
+    if (!engineName || (!engineName.includes('2023') && !engineName.includes('2024'))) {
+        res.status(400).end("Invalid engine version. Only Revit 2023 and 2024 are supported.");
+        return;
+    }
 
     let activities = null;
     try {
@@ -240,7 +263,8 @@ router.post('/designautomation/activities', async( req, res, next) => {
                     description: "upgraded revit Rte file",
                     localName: "revitupgrade.rte"
                 }
-            }
+            },
+            Description: `Upgrade Revit files to ${engineName}`
         }
         try{
             newActivity = await apiClientCallAsync( 'POST',  designAutomation.URL.ACTIVITIES_URL, req.oauth_token.access_token, activitySpec );
@@ -257,14 +281,16 @@ router.post('/designautomation/activities', async( req, res, next) => {
         }
         const activityRes = {
             Activity : qualifiedActivityId,
-            Status : "Created"
+            Status : "Created",
+            Engine : engineName
         }
         res.status(200).end(JSON.stringify(activityRes));
         return;
     }
     const activityRes = {
         Activity : qualifiedActivityId,
-        Status : "Existing"
+        Status : "Existing",
+        Engine : engineName
     }
     res.status(200).end(JSON.stringify(activityRes));
     return;

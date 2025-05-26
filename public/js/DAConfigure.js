@@ -120,6 +120,13 @@ function defineActivityModal() {
 async function createAppBundleActivity() {
     const zipFileName = $('#localBundles').val();
     const fileName = zipFileName.split('.')[0];
+    const selectedEngine = $('#engines').val();
+
+    // Validate engine selection
+    if (!selectedEngine) {
+        alert('Please select an engine version');
+        return;
+    }
 
     try{
         updateConfigStatus('creating_appbundle', fileName+"AppBundle")
@@ -250,4 +257,4 @@ function setProgress(percent, progressbarId ) {
     } else {
         progressBar.parentElement.className = "progress progress-striped active"
     }
-  }
+}
