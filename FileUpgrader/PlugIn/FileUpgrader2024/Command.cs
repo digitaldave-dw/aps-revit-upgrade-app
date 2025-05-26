@@ -8,7 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FileUpgrader2024
+namespace ADNPlugin.Revit.FileUpgrader2024
 {
     internal class RuntimeValue
     {
@@ -84,7 +84,7 @@ namespace FileUpgrader2024
                 Console.WriteLine($"Is Central Model: {fileInfo.IsCentral}");
                 Console.WriteLine($"Is Worksharing Enabled: {fileInfo.IsWorkshared}");
 
-                if (fileInfo.Format.Equals("2023"))
+                if (fileInfo.Format.Equals("2024"))
                 {
                     Console.WriteLine("File is already in 2023 format. No upgrade needed.");
                     return;

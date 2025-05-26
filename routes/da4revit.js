@@ -232,15 +232,27 @@ class BulkProcessingQueue {
     // Submit file to Design Automation
     async submitToDesignAutomation(file, options) {
         try {
-            // Get file information
+            console.log(`📋 Preparing bulk file for DA: ${file.fileItemName}`);
+            
+            // Extract project and resource IDs from file URL
             const params = file.fileItemId.split('/');
             const resourceId = params[params.length - 1];
             const projectId = params[params.length - 3];
 
-            // Create storage and version data
+            // Get parent folder information
             const items = new ItemsApi();
-            const folder = await items.getItemParentFolder(projectId, resourceId, options.oauth_client, options.oauth_token);
+            const folder = await items.getItemParentFolder(
+                projectId, 
+                resourceId, 
+                options.oauth_client, 
+                options.oauth_token
+            );
             
+            if (!folder || folder.statusCode !== 200) {
+                throw new Error('Failed to get parent folder');
+            }
+
+            // Create new storage for the upgraded file
             const storageInfo = await getNewCreatedStorageInfo(
                 projectId, 
                 folder.body.data.id, 
@@ -248,21 +260,38 @@ class BulkProcessingQueue {
                 options.oauth_client, 
                 options.oauth_token
             );
-
-            const versionInfo = await getLatestVersionInfo(projectId, resourceId, options.oauth_client, options.oauth_token);
             
+            if (!storageInfo) {
+                throw new Error('Failed to create storage');
+            }
+
+            // Get version information
+            const versionInfo = await getLatestVersionInfo(
+                projectId, 
+                resourceId, 
+                options.oauth_client, 
+                options.oauth_token
+            );
+            
+            if (!versionInfo) {
+                throw new Error('Failed to get version information');
+            }
+            
+            // Create version creation payload with target version
             const createVersionBody = createBodyOfPostVersion(
                 resourceId,
                 file.fileItemName, 
                 storageInfo.StorageId,
                 versionInfo.versionType,
-                options.targetVersion
+                options.targetVersion  // Use targetVersion from bulk options
             );
 
             // Get file extension
             const fileExtension = file.fileItemName.split('.').pop().toLowerCase();
 
-            // Submit to Design Automation
+            console.log(`📤 Submitting bulk file to DA: ${file.fileItemName} → Revit ${options.targetVersion}`);
+
+            // Submit to Design Automation with target version
             const upgradeRes = await upgradeFile(
                 versionInfo.versionStorageId, 
                 storageInfo.StorageId, 
@@ -271,38 +300,47 @@ class BulkProcessingQueue {
                 fileExtension, 
                 options.oauth_token, 
                 options.oauth_token_2legged,
-                true // isNewVersion
+                true,                        // isNewVersion
+                options.targetVersion        // CRITICAL: Pass the target version!
             );
 
-            // CRITICAL: Store the version creation data with the workitem info
+            // Store all necessary data for webhook callback
             if (!global.bulkJobWorkitems) {
                 global.bulkJobWorkitems = new Map();
             }
             
-            // Store all necessary data for the webhook callback
+            // Store workitem data including target version
             global.bulkJobWorkitems.set(upgradeRes.body.id, {
-                bulkJob: this.queue[0], // Current bulk job
+                bulkJob: this.queue[0],      // Current bulk job
                 file: file,
                 processingKey: `${file.fileItemId}_${Date.now()}`,
-                createVersionData: createVersionBody,  // Store version creation data
+                createVersionData: createVersionBody,
                 projectId: projectId,
                 oauth_client: options.oauth_client,
-                oauth_token: options.oauth_token
+                oauth_token: options.oauth_token,
+                targetVersion: options.targetVersion  // Store for logging
             });
+
+            console.log(`✅ Bulk file submitted: ${file.fileItemName}`);
+            console.log(`   Workitem: ${upgradeRes.body.id}`);
+            console.log(`   Activity: FileUpgraderApp_${options.targetVersion}Activity`);
 
             return {
                 success: true,
                 workItemId: upgradeRes.body.id,
-                workItemStatus: upgradeRes.body.status
+                workItemStatus: upgradeRes.body.status,
+                targetVersion: options.targetVersion
             };
 
         } catch (error) {
+            console.log(`❌ Failed to submit ${file.fileItemName}:`, error.message);
             return {
                 success: false,
                 error: error.message
             };
         }
     }
+
 
     // Updated fillAvailableSlots method with better tracking
     async fillAvailableSlots(bulkJob) {
@@ -474,17 +512,37 @@ router.use(async (req, res, next) => {
 
 
 ///////////////////////////////////////////////////////////////////////
-/// NEW: Bulk upgrade multiple files from a folder
+/// UPDATED: Bulk upgrade endpoint
+/// This endpoint remains mostly the same but ensures targetVersion is passed
 ///////////////////////////////////////////////////////////////////////
 router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
-    const { folderId, projectId, targetVersion = "2023", supportedTypes = ['rvt', 'rfa', 'rte'] } = req.body;
+    const { 
+        folderId, 
+        projectId, 
+        targetVersion = "2023",  // Default to 2023 if not specified
+        supportedTypes = ['rvt', 'rfa', 'rte'] 
+    } = req.body;
 
+    // Validate inputs
     if (!folderId || !projectId) {
         return res.status(400).json({ error: 'folderId and projectId are required' });
     }
 
+    // Validate target version
+    if (targetVersion !== '2023' && targetVersion !== '2024') {
+        return res.status(400).json({ 
+            error: 'Invalid target version',
+            message: 'Target version must be either 2023 or 2024'
+        });
+    }
+
     try {
-        console.log('Starting bulk processing for:', { projectId, folderId, targetVersion, supportedTypes });
+        console.log('🚀 Starting bulk processing:', { 
+            projectId, 
+            folderId, 
+            targetVersion, 
+            supportedTypes 
+        });
 
         // Import the helper function
         const { getFolderContentsForUpgrade, isWorksharingFile } = require('./common/datamanagementImp');
@@ -497,14 +555,14 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
             req.oauth_token
         );
         
-        // Get the upgradeable items (already filtered)
+        // Get the upgradeable items (already filtered for non-workshared files)
         const revitFiles = folderData.upgradeableItems.filter(item => {
             const fileName = item.attributes.displayName || item.attributes.name;
             const extension = fileName.split('.').pop().toLowerCase();
             return supportedTypes.includes(extension);
         });
 
-        // Count excluded files
+        // Count excluded workshared files
         const excludedWorksharedFiles = folderData.allItems.filter(item => {
             if (item.type !== 'items') return false;
             const fileName = item.attributes.displayName || item.attributes.name;
@@ -515,8 +573,8 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
             return supportedTypes.includes(extension) && isWorksharingFile(item);
         });
 
-        console.log(`Found ${revitFiles.length} Revit files for bulk processing`);
-        console.log(`Excluded ${excludedWorksharedFiles.length} workshared files`);
+        console.log(`📊 Found ${revitFiles.length} files for bulk processing`);
+        console.log(`⚠️  Excluded ${excludedWorksharedFiles.length} workshared files`);
 
         if (revitFiles.length === 0) {
             let errorMessage = 'No supported Revit files found in folder';
@@ -528,6 +586,7 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
             return res.status(404).json({ 
                 error: errorMessage,
                 supportedExtensions: supportedTypes,
+                targetVersion: targetVersion,
                 excludedWorksharedCount: excludedWorksharedFiles.length,
                 excludedWorksharedFiles: excludedWorksharedFiles.map(f => 
                     f.attributes.displayName || f.attributes.name
@@ -549,20 +608,27 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
         const oauth_client_2legged = oauth.get2LeggedClient();
         const oauth_token_2legged = await oauth_client_2legged.authenticate();
 
-        // Add to processing queue
+        // Add to processing queue with target version
         const batchId = bulkQueue.addBulkJob(filesToProcess, {
-            targetVersion,
+            targetVersion,              // CRITICAL: Include target version
             oauth_client: req.oauth_client,
             oauth_token: req.oauth_token,
             oauth_token_2legged
         });
 
+        console.log(`✅ Bulk job created: ${batchId}`);
+        console.log(`   Files: ${filesToProcess.length}`);
+        console.log(`   Target: Revit ${targetVersion}`);
+        console.log(`   Activity: FileUpgraderApp_${targetVersion}Activity`);
+
         res.json({
             success: true,
             batchId,
             totalFiles: filesToProcess.length,
+            targetVersion: targetVersion,
+            activityUsed: `FileUpgraderApp_${targetVersion}Activity`,
             excludedWorksharedCount: excludedWorksharedFiles.length,
-            message: `Started bulk processing of ${filesToProcess.length} files` + 
+            message: `Started bulk processing of ${filesToProcess.length} files to Revit ${targetVersion}` + 
                      (excludedWorksharedFiles.length > 0 ? 
                       ` (${excludedWorksharedFiles.length} workshared files excluded)` : ''),
             files: filesToProcess.map(f => f.fileItemName),
@@ -572,10 +638,11 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
         });
 
     } catch (err) {
-        console.log('Error in bulk processing:', err);
+        console.log('❌ Error in bulk processing:', err);
         res.status(500).json({ 
             error: 'Failed to start bulk processing',
-            details: err.message 
+            details: err.message,
+            targetVersion: targetVersion
         });
     }
 });
@@ -650,183 +717,303 @@ router.delete('/da4revit/v1/upgrader/bulk/:batchId', async (req, res, next) => {
 router.post('/da4revit/v1/upgrader/files', async (req, res, next) => {
     const fileItemId = req.body.fileItemId;
     const fileItemName = req.body.fileItemName;
-    const targetVersion = req.body.targetVersion || "2023";
+    const targetVersion = req.body.targetVersion || "2023"; // Get target version from request, default to 2023
 
-    // ... existing validation code ...
+    // Validate inputs
+    if (fileItemId === '' || fileItemName === '') {
+        console.log('info: Missing file ID or name');
+        res.status(400).end('fileItemId and fileItemName are required');
+        return;
+    }
 
+    // Extract project and resource IDs from the file path
     const params = fileItemId.split('/');
+    if (params.length < 3) {
+        console.log('info: Invalid file URL format');
+        res.status(400).end('Invalid file URL format');
+        return;
+    }
+    
     const resourceId = params[params.length - 1];
     const projectId = params[params.length - 3];
 
-    console.log(`🚀 Starting upgrade: ${fileItemName} → ${targetVersion}`);
+    // Validate target version
+    if (targetVersion !== '2023' && targetVersion !== '2024') {
+        console.log('info: Invalid target version specified');
+        res.status(400).end('Target version must be either 2023 or 2024');
+        return;
+    }
+
+    console.log(`🚀 Starting upgrade: ${fileItemName} → Revit ${targetVersion}`);
+    console.log(`   Project: ${projectId}, Resource: ${resourceId}`);
 
     try {
-        // Get necessary info
+        // Get the parent folder of the file
         const items = new ItemsApi();
         const folder = await items.getItemParentFolder(projectId, resourceId, req.oauth_client, req.oauth_token);
+        if (!folder || folder.statusCode !== 200) {
+            throw new Error('Failed to get parent folder');
+        }
+
+        // Get the latest version information
         const versionInfo = await getLatestVersionInfo(projectId, resourceId, req.oauth_client, req.oauth_token);
-        const storageInfo = await getNewCreatedStorageInfo(projectId, folder.body.data.id, fileItemName, req.oauth_client, req.oauth_token);
-        
-        // FIXED: Use the corrected version creation function
+        if (!versionInfo) {
+            throw new Error('Failed to get latest version information');
+        }
+
+        // Create new storage for the upgraded file
+        const storageInfo = await getNewCreatedStorageInfo(
+            projectId, 
+            folder.body.data.id, 
+            fileItemName, 
+            req.oauth_client, 
+            req.oauth_token
+        );
+        if (!storageInfo) {
+            throw new Error('Failed to create storage for upgraded file');
+        }
+
+        // Extract file extension for validation
+        const fileExtension = fileItemName.split('.').pop().toLowerCase();
+        if (fileExtension !== 'rvt' && fileExtension !== 'rfa' && fileExtension !== 'rte') {
+            console.log('info: Unsupported file format');
+            res.status(400).end('Only RVT, RFA, and RTE files are supported');
+            return;
+        }
+
+        // Create the version creation payload
         const createVersionBody = createBodyOfPostVersion(
             resourceId,                // fileId
             fileItemName,             // fileName
             storageInfo.StorageId,    // storageId
-            versionInfo.versionType,  // versionType
-            targetVersion            // targetVersion
+            versionInfo.versionType,  // versionType (e.g., "autodesk.bim360:File")
+            targetVersion            // targetVersion for metadata
         );
         
-        // Ensure correct type
+        // Ensure the data type is correct for version creation
         createVersionBody.data.type = "versions";
         
-        // Submit workitem
+        // Get 2-legged OAuth token for Design Automation
         const oauth = new OAuth(req.session);
         const oauth_client = oauth.get2LeggedClient();
         const oauth_token = await oauth_client.authenticate();
         
-        console.log(`📤 Submitting to DA: ${fileItemName}`);
-        console.log(`📡 Webhook: ${designAutomation.webhook_url}`);
+        console.log(`📤 Submitting to Design Automation for Revit ${targetVersion} upgrade`);
+        console.log(`   Input storage: ${versionInfo.versionStorageId}`);
+        console.log(`   Output storage: ${storageInfo.StorageId}`);
+        console.log(`   Webhook URL: ${designAutomation.webhook_url}`);
         
+        // Submit the upgrade job to Design Automation
+        // CRITICAL: Pass the targetVersion parameter
         let upgradeRes = await upgradeFile(
-            versionInfo.versionStorageId,  // input
-            storageInfo.StorageId,         // output
-            projectId,
-            createVersionBody,             // FIXED payload
-            fileExtension,
-            req.oauth_token,
-            oauth_token,
-            true                          // isNewVersion = true
+            versionInfo.versionStorageId,  // input storage URL
+            storageInfo.StorageId,         // output storage URL
+            projectId,                     // project ID for version creation
+            createVersionBody,             // version creation payload
+            fileExtension,                 // file extension (rvt, rfa, rte)
+            req.oauth_token,               // 3-legged token for BIM360
+            oauth_token,                   // 2-legged token for DA
+            true,                          // isNewVersion = true
+            targetVersion                  // CRITICAL: Pass the target version!
         );
         
         console.log(`✅ Workitem submitted: ${upgradeRes.body.id}`);
+        console.log(`   Status: ${upgradeRes.body.status}`);
+        console.log(`   Activity: FileUpgraderApp_${targetVersion}Activity`);
         
+        // Return success response with workitem details
         res.status(200).json({
             "fileName": fileItemName,
             "workItemId": upgradeRes.body.id,
             "workItemStatus": upgradeRes.body.status,
-            "targetVersion": targetVersion
+            "targetVersion": targetVersion,
+            "activityUsed": `FileUpgraderApp_${targetVersion}Activity`,
+            "message": `Upgrading ${fileItemName} to Revit ${targetVersion}`
         });
         
     } catch (err) {
-        console.log('❌ Upload error:', err.message);
+        console.log('❌ Upgrade error:', err.message);
+        console.log('   Stack:', err.stack);
+        
+        // Return detailed error response
         res.status(500).json({
             error: 'Failed to upgrade file',
-            details: err.message
+            details: err.message,
+            fileName: fileItemName,
+            targetVersion: targetVersion
         });
     }
 });
 
 
 ///////////////////////////////////////////////////////////////////////
-///
-///
+/// UPDATED: Endpoint for copying and upgrading files to a different folder
+/// This handles the case where users want to upgrade a file and save it to a different location
 ///////////////////////////////////////////////////////////////////////
 router.post('/da4revit/v1/upgrader/files/:source_file_url/folders/:destinate_folder_url', async (req, res, next) => {
     const sourceFileUrl = (req.params.source_file_url); 
     const destinateFolderUrl = (req.params.destinate_folder_url);
+    const targetVersion = req.body.targetVersion || "2023"; // Add support for target version
+    
+    // Validate inputs
     if (sourceFileUrl === '' || destinateFolderUrl === '') {
-        res.status(400).end('make sure sourceFile and destinateFolder have correct value');
+        res.status(400).end('Source file and destination folder URLs are required');
         return;
     }
+    
+    // Parse URLs to extract IDs
     const sourceFileParams = sourceFileUrl.split('/');
     const destinateFolderParams = destinateFolderUrl.split('/');
+    
     if (sourceFileParams.length < 3 || destinateFolderParams.length < 3) {
-        console.log('info: the url format is not correct');
-        res.status(400).end('the url format is not correct');
+        console.log('info: Invalid URL format');
+        res.status(400).end('Invalid URL format');
         return;
     }
 
+    // Validate URL types
     const sourceFileType = sourceFileParams[sourceFileParams.length - 2];
     const destinateFolderType = destinateFolderParams[destinateFolderParams.length - 2];
+    
     if (sourceFileType !== 'items' || destinateFolderType !== 'folders') {
-        console.log('info: not supported item');
-        res.status(400).end('not supported item');
+        console.log('info: Invalid source or destination type');
+        res.status(400).end('Source must be an item and destination must be a folder');
         return;
     }
 
+    // Extract IDs from URLs
     const sourceFileId = sourceFileParams[sourceFileParams.length - 1];
     const sourceProjectId = sourceFileParams[sourceFileParams.length - 3];
-
     const destinateFolderId = destinateFolderParams[destinateFolderParams.length - 1];
     const destinateProjectId = destinateFolderParams[destinateFolderParams.length - 3];
 
+    // Validate target version
+    if (targetVersion !== '2023' && targetVersion !== '2024') {
+        console.log('info: Invalid target version specified');
+        res.status(400).end('Target version must be either 2023 or 2024');
+        return;
+    }
+
+    console.log(`📁 Cross-folder upgrade: ${sourceFileId} → ${destinateFolderId} (Revit ${targetVersion})`);
+
     try {
-        ////////////////////////////////////////////////////////////////////////////////
-        // get the storage of the input item version
+        // Get the storage of the input item version
         const versionInfo = await getLatestVersionInfo(sourceProjectId, sourceFileId, req.oauth_client, req.oauth_token);
         if (versionInfo === null) {
-            console.log('error: failed to get lastest version of the file');
-            res.status(500).end('failed to get lastest version of the file');
+            console.log('error: Failed to get latest version of the file');
+            res.status(500).end('Failed to get latest version of the file');
             return;
         }
         const inputStorageId = versionInfo.versionStorageId;
 
+        // Get source file information
         const items = new ItemsApi();
         const sourceFile = await items.getItem(sourceProjectId, sourceFileId, req.oauth_client, req.oauth_token);
         if (sourceFile === null || sourceFile.statusCode !== 200) {
-            console.log('error: failed to get the current file item.');
-            res.status(500).end('failed to get the current file item');
+            console.log('error: Failed to get the source file item');
+            res.status(500).end('Failed to get the source file item');
             return;
         }
+        
         const fileName = sourceFile.body.data.attributes.displayName;
         const itemType = sourceFile.body.data.attributes.extension.type;
 
+        // Validate file extension
         const fileParams = fileName.split('.');
         const fileExtension = fileParams[fileParams.length-1].toLowerCase();
-        if( fileExtension !== 'rvt' && fileExtension !== 'rfa' && fileExtension !== 'fte'){
-            console.log('info: the file format is not supported');
-            res.status(500).end('the file format is not supported');
+        if (fileExtension !== 'rvt' && fileExtension !== 'rfa' && fileExtension !== 'rte') {
+            console.log('info: Unsupported file format');
+            res.status(400).end('Only RVT, RFA, and RTE files are supported');
             return;
         }
     
-        ////////////////////////////////////////////////////////////////////////////////
-        // create a new storage for the ouput item version
-        const storageInfo = await getNewCreatedStorageInfo(destinateProjectId, destinateFolderId, fileName, req.oauth_client, req.oauth_token);
+        // Create a new storage in the destination folder
+        const storageInfo = await getNewCreatedStorageInfo(
+            destinateProjectId, 
+            destinateFolderId, 
+            fileName, 
+            req.oauth_client, 
+            req.oauth_token
+        );
         if (storageInfo === null) {
-            console.log('error: failed to create the storage');
-            res.status(500).end('failed to create the storage');
+            console.log('error: Failed to create storage in destination');
+            res.status(500).end('Failed to create storage in destination');
             return;
         }
 
-        const createFirstVersionBody = createBodyOfPostItem(fileName, destinateFolderId, storageInfo.StorageId, itemType, versionInfo.versionType)
+        // Create the payload for posting a new item (not a version)
+        const createFirstVersionBody = createBodyOfPostItem(
+            fileName, 
+            destinateFolderId, 
+            storageInfo.StorageId, 
+            itemType, 
+            versionInfo.versionType
+        );
         if (createFirstVersionBody === null) {
-            console.log('failed to create body of Post Item');
-            res.status(500).end('failed to create body of Post Item');
+            console.log('error: Failed to create item creation payload');
+            res.status(500).end('Failed to create item creation payload');
             return;
         }
 
-        
-        ////////////////////////////////////////////////////////////////////////////////
-        // use 2 legged token for design automation
+        // Get 2-legged token for Design Automation
         const oauth = new OAuth(req.session);
-        const oauth_client = oauth.get2LeggedClient();;
+        const oauth_client = oauth.get2LeggedClient();
         const oauth_token = await oauth_client.authenticate();
-        let upgradeRes = await upgradeFile(inputStorageId, storageInfo.StorageId, destinateProjectId, createFirstVersionBody,fileExtension, req.oauth_token, oauth_token);
+        
+        console.log(`📤 Submitting cross-folder upgrade to DA for Revit ${targetVersion}`);
+        console.log(`   Source: ${fileName} from project ${sourceProjectId}`);
+        console.log(`   Destination: folder ${destinateFolderId} in project ${destinateProjectId}`);
+        
+        // Submit the upgrade job to Design Automation
+        // CRITICAL: Pass the targetVersion parameter
+        let upgradeRes = await upgradeFile(
+            inputStorageId,           // input storage URL from source file
+            storageInfo.StorageId,    // output storage URL in destination
+            destinateProjectId,       // destination project ID
+            createFirstVersionBody,   // item creation payload
+            fileExtension,            // file extension
+            req.oauth_token,          // 3-legged token
+            oauth_token,              // 2-legged token
+            false,                    // isNewVersion = false (creating new item)
+            targetVersion             // CRITICAL: Pass the target version!
+        );
+        
         if (upgradeRes === null || upgradeRes.statusCode !== 200) {
-            console.log('failed to upgrade the revit file');
-            res.status(500).end('failed to upgrade the revit file');
+            console.log('error: Failed to submit upgrade job');
+            res.status(500).end('Failed to submit upgrade job');
             return;
         }
-        console.log('Submitted the workitem: '+ upgradeRes.body.id);
+        
+        console.log(`✅ Cross-folder workitem submitted: ${upgradeRes.body.id}`);
+        console.log(`   Activity: FileUpgraderApp_${targetVersion}Activity`);
+        
+        // Return success response
         const upgradeInfo = {
             "fileName": fileName,
             "workItemId": upgradeRes.body.id,
-            "workItemStatus": upgradeRes.body.status
+            "workItemStatus": upgradeRes.body.status,
+            "targetVersion": targetVersion,
+            "activityUsed": `FileUpgraderApp_${targetVersion}Activity`,
+            "sourceProject": sourceProjectId,
+            "destinationProject": destinateProjectId,
+            "message": `Copying and upgrading ${fileName} to Revit ${targetVersion}`
         };
         res.status(200).end(JSON.stringify(upgradeInfo));
 
     } catch (err) {
-        console.log('get exception while upgrading the file:', err);
+        console.log('❌ Cross-folder upgrade error:', err);
         
         if (typeof err === 'object') {
             if (err.statusCode) {
                 return res.status(err.statusCode).json({
                     error: err.statusMessage || 'Unknown error',
-                    details: err
+                    details: err,
+                    targetVersion: targetVersion
                 });
             } else {
                 return res.status(500).json({
-                    error: err.message || 'Unknown error'
+                    error: err.message || 'Unknown error',
+                    targetVersion: targetVersion
                 });
             }
         }

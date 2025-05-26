@@ -42,6 +42,7 @@ const AUTODESK_HUB_BUCKET_KEY = 'wip.dm.prod';
 var workitemList = [];
 
 // Enhanced workitem tracking for bulk operations
+// Enhanced workitem tracking for bulk operations
 class WorkitemTracker {
     constructor() {
         this.activeWorkitems = new Map();
@@ -103,9 +104,6 @@ class WorkitemTracker {
 
 const workitemTracker = new WorkitemTracker();
 
-///////////////////////////////////////////////////////////////////////
-/// Get workitem status
-///////////////////////////////////////////////////////////////////////
 function getWorkitemStatus(workItemId, access_token) {
     return new Promise(function (resolve, reject) {
         var options = {
@@ -188,9 +186,9 @@ function cancelWorkitem(workItemId, access_token) {
 }
 
 ///////////////////////////////////////////////////////////////////////
-/// Enhanced upgrade file function with better error handling and queue management
+/// Enhanced upgrade file function with version support
 ///////////////////////////////////////////////////////////////////////
-function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExtension, access_token_3Legged, access_token_2Legged, isNewVersion = false) {
+function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExtension, access_token_3Legged, access_token_2Legged, isNewVersion = false, targetVersion = '2023') {
     return new Promise(function (resolve, reject) {
         // Validate required parameters
         if (!inputUrl || !outputUrl || !projectId || !createVersionData) {
@@ -203,6 +201,7 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             - createVersionData.data.type=${createVersionData.data.type}
             - fileExtension=${fileExtension}
             - projectId=${projectId}
+            - targetVersion=${targetVersion}
             - activeWorkitems=${activeCount}`);
 
         // Check if we're approaching DA limits
@@ -216,7 +215,8 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             createVersionData.data.type = "versions";
         }
 
-        const workitemBody = createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token_3Legged.access_token);
+        // CRITICAL: Pass the target version to createPostWorkitemBody
+        const workitemBody = createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token_3Legged.access_token, targetVersion);
         if (workitemBody === null) {
             reject('workitem request body is null');
             return;
@@ -233,7 +233,7 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             json: true
         };
 
-        console.log('Submitting workitem to DA...');
+        console.log('Submitting workitem to DA with activity:', workitemBody.activityId);
 
         request(options, function (error, response, body) {
             if (error) {
@@ -272,6 +272,7 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
 
             console.log(`Workitem submitted successfully: ${resp.id}`);
             console.log(`- Operation type: ${isVersionOperation ? 'VERSION' : 'ITEM'}`);
+            console.log(`- Target Revit version: ${targetVersion}`);
 
             // Enhanced workitem data storage
             const workitemData = {
@@ -285,7 +286,8 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
                 submittedAt: new Date(),
                 inputUrl: inputUrl,
                 outputUrl: outputUrl,
-                fileExtension: fileExtension
+                fileExtension: fileExtension,
+                targetVersion: targetVersion // Store the target version
             };
 
             // Add to both tracking systems
@@ -491,15 +493,20 @@ function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targe
 }
 
 ///////////////////////////////////////////////////////////////////////
-/// Create workitem body with enhanced error handling
+/// Create workitem body with version-specific activity
 ///////////////////////////////////////////////////////////////////////
-function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token) {
-    if (!designAutomation.nickname || !designAutomation.activity_name || !designAutomation.appbundle_activity_alias) {
+function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token, targetVersion = '2023') {
+    if (!designAutomation.nickname || !designAutomation.appbundle_activity_alias) {
         console.error('Missing Design Automation configuration');
         return null;
     }
 
-    const activityId = `${designAutomation.nickname}.${designAutomation.activity_name}+${designAutomation.appbundle_activity_alias}`;
+    // CRITICAL: Construct the versioned activity name based on target version
+    // Using the naming convention: FileUpgraderApp_2023Activity or FileUpgraderApp_2024Activity
+    const versionedActivityName = `FileUpgraderApp_${targetVersion}Activity`;
+    const activityId = `${designAutomation.nickname}.${versionedActivityName}+${designAutomation.appbundle_activity_alias}`;
+    
+    console.log(`Creating workitem for Revit ${targetVersion} with activity: ${activityId}`);
     
     let body = null;
     switch (fileExtension) {
@@ -581,7 +588,7 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
             return null;
     }
     
-    console.log(`Created workitem body for ${fileExtension} file with activity: ${activityId}`);
+    console.log(`Created workitem body for ${fileExtension} file with activity: ${activityId} targeting Revit ${targetVersion}`);
     return body;
 }
 
