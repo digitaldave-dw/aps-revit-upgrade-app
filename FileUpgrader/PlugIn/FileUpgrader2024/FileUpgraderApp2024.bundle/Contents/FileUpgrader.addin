@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+	<AddIn Type="DBApplication">
+		<Name>File Upgrade App</Name>
+		<Assembly>FileUpgrader2024.dll</Assembly>
+		<ClientId>2e3fd349-04b7-4d14-bd7e-e1532f2cd8e6</ClientId>
+		<FullClassName>ADNPlugin.Revit.FileUpgrader2024.FileUpgradeApp</FullClassName>
+		<Description>"Upgrade Revit files to lastest version."</Description>
+		<VendorId>aps</VendorId>
+		<VendorDescription>Autodesk</VendorDescription>
+	</AddIn>
+</RevitAddIns>

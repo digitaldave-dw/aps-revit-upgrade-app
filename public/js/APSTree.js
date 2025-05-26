@@ -276,7 +276,7 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
   try {
     bulkProcessingActive = true;
     
-    // Extract IDs from the source node instead of destination
+    // Extract IDs from the source node
     const sourceParams = sourceNode.id.split('/');
     const sourceFolderId = sourceParams[sourceParams.length - 1];
     const projectId = sourceParams[sourceParams.length - 3];
@@ -289,7 +289,7 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
 
     console.log('Starting bulk processing:', {
       projectId: projectId,
-      folderId: sourceFolderId,  // Use source folder ID
+      folderId: sourceFolderId,
       targetVersion: targetVersion,
       supportedTypes: supportedTypes
     });
@@ -300,7 +300,7 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
     
     addGroupListItem(
       'Bulk Processing', 
-      'Initializing...', 
+      'Analyzing folder contents...', 
       ItemType.FOLDER, 
       'list-group-item-info'
     );
@@ -313,7 +313,7 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
       dataType: 'json',
       data: JSON.stringify({
         projectId: projectId,
-        folderId: sourceFolderId,  // Send source folder ID
+        folderId: sourceFolderId,
         targetVersion: targetVersion,
         supportedTypes: supportedTypes
       })
@@ -322,21 +322,51 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
     if (response.success) {
       currentBatchId = response.batchId;
       
-      // Update the initial status
-      const entries = Array.from(logList.children);
-      if (entries.length > 0) {
-        entries[0].className = 'list-group-item list-group-item-success';
-        const label = entries[0].querySelector('label');
-        if (label) {
-          label.textContent = `, Processing ${response.totalFiles} files`;
+      // Clear initial status
+      logList.innerHTML = '';
+      
+      // Show summary including workshared files
+      addGroupListItem(
+        'Bulk Processing Started', 
+        `Processing ${response.totalFiles} files`, 
+        ItemType.FOLDER, 
+        'list-group-item-success'
+      );
+      
+      // Show workshared file warning if any were excluded
+      if (response.excludedWorksharedCount > 0) {
+        addGroupListItem(
+          'Workshared Files Excluded', 
+          `${response.excludedWorksharedCount} workshared files cannot be upgraded`, 
+          ItemType.FOLDER, 
+          'list-group-item-warning'
+        );
+        
+        // List the first few excluded files
+        response.excludedFiles.slice(0, 3).forEach(fileName => {
+          addGroupListItem(
+            `🔒 ${fileName}`, 
+            'WORKSHARED - EXCLUDED', 
+            ItemType.FILE, 
+            'list-group-item-warning'
+          );
+        });
+        
+        if (response.excludedFiles.length > 3) {
+          addGroupListItem(
+            `... and ${response.excludedFiles.length - 3} more workshared files`, 
+            'EXCLUDED', 
+            ItemType.FOLDER, 
+            'list-group-item-warning'
+          );
         }
       }
       
-      // Show file list
+      // Show file list for processing
       if (response.files && response.files.length > 0) {
         response.files.forEach((fileName, index) => {
           if (index < 10) { // Show first 10 files
-            addGroupListItem(fileName, 'QUEUED', ItemType.FILE, 'list-group-item-warning');
+            addGroupListItem(fileName, 'QUEUED', ItemType.FILE, 'list-group-item-info');
           }
         });
         
@@ -345,15 +375,16 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
             `... and ${response.files.length - 10} more files`, 
             'QUEUED', 
             ItemType.FOLDER, 
-            'list-group-item-warning'
+            'list-group-item-info'
           );
         }
       }
       
       document.getElementById('upgradeTitle').innerHTML = 
-        `<h4>🚀 Bulk Processing Started - ${response.totalFiles} files queued</h4>`;
-      
-      // No need for manual progress monitoring - the WebSocket will handle it
+        `<h4>🚀 Bulk Processing: ${response.totalFiles} files queued` +
+        (response.excludedWorksharedCount > 0 ? 
+         ` (${response.excludedWorksharedCount} workshared excluded)` : '') +
+        `</h4>`;
       
     } else {
       throw new Error(response.error || 'Failed to start bulk processing');
@@ -363,55 +394,44 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
     console.error('Bulk processing error:', error);
     
     let errorMessage = 'Unknown error';
-    if (error.responseJSON && error.responseJSON.error) {
-      errorMessage = error.responseJSON.error;
-      if (error.responseJSON.supportedExtensions) {
-        errorMessage += ` (Supported: ${error.responseJSON.supportedExtensions.join(', ')})`;
+    let excludedInfo = '';
+    
+    if (error.responseJSON) {
+      errorMessage = error.responseJSON.error || errorMessage;
+      
+      // Check if all files were workshared
+      if (error.responseJSON.excludedWorksharedCount > 0) {
+        excludedInfo = ` (${error.responseJSON.excludedWorksharedCount} workshared files were found but cannot be processed)`;
+        
+        // Show the excluded files if available
+        if (error.responseJSON.excludedWorksharedFiles) {
+          logList.innerHTML = '';
+          addGroupListItem(
+            'No Upgradeable Files', 
+            'All Revit files in this folder are workshared', 
+            ItemType.FOLDER, 
+            'list-group-item-danger'
+          );
+          
+          error.responseJSON.excludedWorksharedFiles.slice(0, 5).forEach(fileName => {
+            addGroupListItem(
+              `🔒 ${fileName}`, 
+              'WORKSHARED - CANNOT UPGRADE', 
+              ItemType.FILE, 
+              'list-group-item-warning'
+            );
+          });
+        }
       }
-    } else if (error.message) {
-      errorMessage = error.message;
-    } else if (error.statusText) {
-      errorMessage = error.statusText;
     }
     
-    addGroupListItem('Bulk Processing', 'Failed: ' + errorMessage, ItemType.FOLDER, 'list-group-item-danger');
+    addGroupListItem('Bulk Processing', 'Failed: ' + errorMessage + excludedInfo, ItemType.FOLDER, 'list-group-item-danger');
     
     let upgradeBtnElm = document.getElementById('upgradeBtn');
     upgradeBtnElm.disabled = false;
     bulkProcessingActive = false;
     document.getElementById('upgradeTitle').innerHTML = `<h4>❌ Bulk Processing Failed: ${errorMessage}</h4>`;
   }
-}
-
-// Monitor bulk processing progress
-function startBulkProgressMonitoring() {
-  if (bulkProgressInterval) {
-    clearInterval(bulkProgressInterval);
-  }
-  
-  bulkProgressInterval = setInterval(async () => {
-    if (!currentBatchId) return;
-    
-    try {
-      const status = await jQuery.ajax({
-        url: `/api/aps/da4revit/v1/upgrader/bulk/${currentBatchId}/status`,
-        method: 'GET',
-        dataType: 'json'
-      });
-      
-      updateBulkProgress(status);
-      
-      // Check if processing is complete
-      if (status.status === 'completed' || 
-          (status.completedFiles + status.failedFiles >= status.totalFiles)) {
-        stopBulkProgressMonitoring();
-        finishBulkProcessing(status);
-      }
-      
-    } catch (error) {
-      console.error('Error getting bulk status:', error);
-    }
-  }, 3000); // Poll every 3 seconds
 }
 
 // Stop bulk progress monitoring
@@ -808,6 +828,7 @@ function prepareUserHubsTree( userHubs) {
       'bim360projects': { 'icon': 'https://cdn.autodesk.io/dm/xs/bim360project.png' },
       'a360projects': { 'icon': 'https://cdn.autodesk.io/dm/xs/a360project.png' },
       'items': { 'icon': 'glyphicon glyphicon-file'},
+      'workshared-item': { 'icon': 'glyphicon glyphicon-lock' },  
       'folders': {'icon': 'glyphicon glyphicon-folder-open' },
       'versions': { 'icon': 'glyphicon glyphicon-time' },
       'unsupported': {'icon': 'glyphicon glyphicon-ban-circle'}
@@ -816,6 +837,9 @@ function prepareUserHubsTree( userHubs) {
     contextmenu: { items: (userHubs === '#sourceHubs'? autodeskCustomMenuSource: autodeskCustomMenuDestination)},
     "state": { "key": userHubs }
   }).bind("activate_node.jstree", function (evt, data) {
+    if (data.node.type === 'workshared-item') {
+      console.log('Selected a workshared file - cannot be upgraded');
+    }
   });
 }
 

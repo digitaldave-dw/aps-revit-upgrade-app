@@ -120,6 +120,13 @@ function defineActivityModal() {
 async function createAppBundleActivity() {
     const zipFileName = $('#localBundles').val();
     const fileName = zipFileName.split('.')[0];
+    const selectedEngine = $('#engines').val();
+
+    // Validate engine selection
+    if (!selectedEngine) {
+        alert('Please select an engine version');
+        return;
+    }
 
     try{
         updateConfigStatus('creating_appbundle', fileName+"AppBundle")
@@ -154,7 +161,7 @@ function createAppBundle(fileName) {
         },
         error: function (err) {
             def.reject(err);
-          }    
+        }    
     });
     return def.promise();
 }
@@ -177,7 +184,7 @@ function createActivity(fileName) {
         error: function (err) {
             console.log(err)
             def.reject(err);
-          }   
+        }   
     });
     return def.promise();
 }
@@ -250,4 +257,4 @@ function setProgress(percent, progressbarId ) {
     } else {
         progressBar.parentElement.className = "progress progress-striped active"
     }
-  }
+}
