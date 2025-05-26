@@ -161,7 +161,7 @@ function createAppBundle(fileName) {
         },
         error: function (err) {
             def.reject(err);
-          }    
+        }    
     });
     return def.promise();
 }
@@ -184,7 +184,7 @@ function createActivity(fileName) {
         error: function (err) {
             console.log(err)
             def.reject(err);
-          }   
+        }   
     });
     return def.promise();
 }

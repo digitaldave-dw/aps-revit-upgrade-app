@@ -1,7 +1,11 @@
 ﻿
-Microsoft Visual Studio Solution File, Format Version 11.00
-# Visual Studio 2010
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.12.35707.178 d17.12
+MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileUpgrader", "FileUpgrader.csproj", "{3F845775-4EAB-4F4C-B33C-2C1E27AB78F4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileUpgrader2024", "..\FileUpgrader2024\FileUpgrader2024.csproj", "{70ACD80D-8DBA-4235-96AE-036F81F16987}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -13,6 +17,10 @@ Global
 		{3F845775-4EAB-4F4C-B33C-2C1E27AB78F4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{3F845775-4EAB-4F4C-B33C-2C1E27AB78F4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{3F845775-4EAB-4F4C-B33C-2C1E27AB78F4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
