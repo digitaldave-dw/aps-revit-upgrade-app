@@ -34,8 +34,9 @@
     <Reference Include="DesignAutomationBridge, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\Source\packages\Autodesk.Forge.DesignAutomation.Revit.2024.0.2\lib\net48\DesignAutomationBridge.dll</HintPath>
     </Reference>
-    <Reference Include="RevitAPI">
-      <HintPath>..\..\..\..\..\..\Program Files\Autodesk\Revit 2023\RevitAPI.dll</HintPath>
+    <Reference Include="RevitAPI, Version=23.0.0.0, Culture=neutral, processorArchitecture=AMD64">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\..\..\..\..\..\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
@@ -58,11 +59,6 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>
-xcopy /Y /F "$(ProjectDir)FileUpgraderApp.bundle\Contents\FileUpgrader.addin" "$(AppData)\Autodesk\REVIT\Addins\2024"
-xcopy /Y /F "$(ProjectDir)bin\Debug\FileUpgrader.dll" "$(AppData)\Autodesk\REVIT\Addins\2024”
-xcopy /Y /F "$(TargetDir)*.dll" "$(ProjectDir)FileUpgraderApp.bundle\Contents\"
-del /F "$(ProjectDir)..\..\..\public\bundles\FileUpgraderApp.zip"
-"C:\Program Files\7-Zip\7z.exe" a -tzip "$(ProjectDir)../../../public/bundles/FileUpgraderApp.zip" "$(ProjectDir)FileUpgraderApp.bundle\" -xr0!*.pdb
 </PostBuildEvent>
   </PropertyGroup>
 </Project>
