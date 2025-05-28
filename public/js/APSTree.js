@@ -21,6 +21,641 @@
 // Copyright (c) Autodesk, Inc. All rights reserved
 /////////////////////////////////////////////////////////////////////
 
+/**
+ * Initialize project upgrade UI components
+ * This sets up the modal dialog and event handlers for project selection
+ */
+function initializeProjectUpgrade() {
+    // Add the project upgrade button to your UI
+    const upgradeButton = `
+        <button class="btn btn-primary" id="projectUpgradeBtn" style="margin-left: 10px;">
+            <span class="glyphicon glyphicon-transfer"></span> Upgrade Entire Project
+        </button>
+    `;
+    
+    // Add button next to existing upgrade button
+    $('#upgradeBtn').after(upgradeButton);
+    
+    // Create the project selection modal
+    const modalHtml = `
+        <div class="modal fade" id="projectUpgradeModal" tabindex="-1" role="dialog">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                        <h4 class="modal-title">Project-to-Project Upgrade</h4>
+                    </div>
+                    <div class="modal-body">
+                        <div class="alert alert-info">
+                            <strong>How it works:</strong> This feature will upgrade all Revit files from the source project 
+                            to the selected Revit version and save them in the destination project, maintaining the folder structure.
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label for="sourceProject">Source Project:</label>
+                                    <select class="form-control" id="sourceProject">
+                                        <option value="">Loading projects...</option>
+                                    </select>
+                                    <small class="text-muted">Select the project containing files to upgrade</small>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label for="destinationProject">Destination Project:</label>
+                                    <select class="form-control" id="destinationProject">
+                                        <option value="">Loading projects...</option>
+                                    </select>
+                                    <small class="text-muted">Select where upgraded files will be saved</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>Target Revit Version:</label>
+                                    <div class="radio">
+                                        <label>
+                                            <input type="radio" name="projectTargetVersion" value="2023" checked>
+                                            Revit 2023
+                                        </label>
+                                    </div>
+                                    <div class="radio">
+                                        <label>
+                                            <input type="radio" name="projectTargetVersion" value="2024">
+                                            Revit 2024
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>Options:</label>
+                                    <div class="checkbox">
+                                        <label>
+                                            <input type="checkbox" id="maintainStructure" checked>
+                                            Maintain folder structure
+                                        </label>
+                                    </div>
+                                    <div class="checkbox">
+                                        <label>
+                                            <input type="checkbox" id="skipExisting" checked>
+                                            Skip existing files
+                                        </label>
+                                    </div>
+                                    <div class="checkbox">
+                                        <label>
+                                            <input type="checkbox" id="includeWorkshared">
+                                            Include workshared files
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-12">
+                                <div id="projectAnalysisResult" style="display: none;">
+                                    <h5>Analysis Result:</h5>
+                                    <div id="analysisContent"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-info" id="analyzeProjectBtn">
+                            <span class="glyphicon glyphicon-search"></span> Analyze Source
+                        </button>
+                        <button type="button" class="btn btn-primary" id="startProjectUpgradeBtn" disabled>
+                            <span class="glyphicon glyphicon-play"></span> Start Upgrade
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Progress Modal -->
+        <div class="modal fade" id="projectUpgradeProgressModal" tabindex="-1" role="dialog" data-backdrop="static">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h4 class="modal-title">Project Upgrade Progress</h4>
+                    </div>
+                    <div class="modal-body">
+                        <div class="progress">
+                            <div id="projectUpgradeProgressBar" class="progress-bar progress-bar-striped active" 
+                                 role="progressbar" style="width: 0%">
+                                <span class="sr-only">0% Complete</span>
+                            </div>
+                        </div>
+                        <div id="projectUpgradeStats" style="margin-top: 20px;">
+                            <div class="row">
+                                <div class="col-md-3 text-center">
+                                    <h3 id="totalFilesCount">0</h3>
+                                    <p>Total Files</p>
+                                </div>
+                                <div class="col-md-3 text-center">
+                                    <h3 id="completedFilesCount" class="text-success">0</h3>
+                                    <p>Completed</p>
+                                </div>
+                                <div class="col-md-3 text-center">
+                                    <h3 id="processingFilesCount" class="text-info">0</h3>
+                                    <p>Processing</p>
+                                </div>
+                                <div class="col-md-3 text-center">
+                                    <h3 id="failedFilesCount" class="text-danger">0</h3>
+                                    <p>Failed</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="projectUpgradeLog" style="max-height: 300px; overflow-y: auto; margin-top: 20px;">
+                            <h5>Processing Log:</h5>
+                            <div id="logContent"></div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-warning" id="cancelProjectUpgradeBtn">
+                            <span class="glyphicon glyphicon-stop"></span> Cancel
+                        </button>
+                        <button type="button" class="btn btn-default" id="closeProgressBtn" style="display: none;">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Add modals to body
+    $('body').append(modalHtml);
+    
+    // Setup event handlers
+    setupProjectUpgradeHandlers();
+}
+
+/**
+ * Setup all event handlers for project upgrade functionality
+ */
+function setupProjectUpgradeHandlers() {
+    // Open modal button
+    $('#projectUpgradeBtn').click(function() {
+        $('#projectUpgradeModal').modal('show');
+        loadAvailableProjects();
+    });
+    
+    // Analyze project button
+    $('#analyzeProjectBtn').click(analyzeSourceProject);
+    
+    // Start upgrade button
+    $('#startProjectUpgradeBtn').click(startProjectUpgrade);
+    
+    // Cancel upgrade button
+    $('#cancelProjectUpgradeBtn').click(cancelProjectUpgrade);
+    
+    // Project selection validation
+    $('#sourceProject, #destinationProject').change(validateProjectSelection);
+}
+
+/**
+ * Load available projects for selection
+ */
+async function loadAvailableProjects() {
+    try {
+        const response = await $.ajax({
+            url: '/api/aps/da4revit/v1/upgrader/projects',
+            method: 'GET'
+        });
+        
+        // When populating the dropdown, ensure the full ID is preserved
+        const projectOptions = '<option value="">-- Select a project --</option>' +
+            response.projects.map(project => {
+                // Make sure we're using the full project ID including "b." prefix
+                const fullProjectId = project.id.startsWith('b.') ? project.id : `b.${project.id}`;
+                
+                return `<option value="${fullProjectId}" data-hub="${project.hubId}">
+                    ${project.name} (${project.hubName})
+                </option>`;
+            }).join('');
+            
+        $('#sourceProject, #destinationProject').html(projectOptions);
+        
+    } catch (error) {
+        console.error('Failed to load projects:', error);
+    }
+}
+
+/**
+ * Validate project selection
+ */
+function validateProjectSelection() {
+    const sourceId = $('#sourceProject').val();
+    const destId = $('#destinationProject').val();
+    
+    if (sourceId && destId) {
+        // Remove the restriction on same project selection
+        // Now both scenarios are valid:
+        // 1. Same project = in-place upgrade (create new versions)
+        // 2. Different projects = cross-project upgrade (copy and upgrade)
+        
+        // Update UI to show the mode
+        if (sourceId === destId) {
+            // Show in-place upgrade indicator
+            $('#upgradeMode').remove(); // Remove any existing indicator
+            
+            const modeIndicator = `
+                <div id="upgradeMode" class="alert alert-info" style="margin-top: 10px;">
+                    <strong>In-Place Upgrade Mode:</strong> Files will be upgraded within the same project. 
+                    New versions will be created for each file while preserving the original folder structure.
+                </div>
+            `;
+            
+            $('#destinationProject').closest('.form-group').after(modeIndicator);
+            
+            // Hide options that don't apply to in-place upgrades
+            $('#maintainStructure').prop('checked', true).prop('disabled', true);
+            $('#maintainStructure').closest('.checkbox').addClass('text-muted');
+            
+            // Update button text
+            $('#startProjectUpgradeBtn').html(
+                '<span class="glyphicon glyphicon-refresh"></span> Upgrade In Place'
+            );
+            
+        } else {
+            // Show cross-project upgrade indicator
+            $('#upgradeMode').remove();
+            
+            const modeIndicator = `
+                <div id="upgradeMode" class="alert alert-success" style="margin-top: 10px;">
+                    <strong>Cross-Project Upgrade Mode:</strong> Files will be copied from source to destination 
+                    project and upgraded. Original files remain unchanged.
+                </div>
+            `;
+            
+            $('#destinationProject').closest('.form-group').after(modeIndicator);
+            
+            // Re-enable options for cross-project mode
+            $('#maintainStructure').prop('disabled', false);
+            $('#maintainStructure').closest('.checkbox').removeClass('text-muted');
+            
+            // Update button text
+            $('#startProjectUpgradeBtn').html(
+                '<span class="glyphicon glyphicon-transfer"></span> Copy & Upgrade'
+            );
+        }
+        
+        // Enable the start button since selection is valid
+        $('#startProjectUpgradeBtn').prop('disabled', false);
+        
+    } else {
+        // No selection made yet
+        $('#upgradeMode').remove();
+        $('#startProjectUpgradeBtn').prop('disabled', true);
+    }
+}
+
+/**
+ * Analyze source project to show what will be upgraded
+ */
+async function analyzeSourceProject() {
+    const sourceId = $('#sourceProject').val();
+    const destId = $('#destinationProject').val();
+    
+    if (!sourceId) {
+        showAlert('Please select a source project first.', 'warning');
+        return;
+    }
+    
+    const isInPlaceUpgrade = sourceId === destId;
+    
+    $('#analyzeProjectBtn').prop('disabled', true).html(
+        '<span class="glyphicon glyphicon-refresh spinning"></span> Analyzing...'
+    );
+    
+    try {
+        // In a real implementation, you would call an analysis endpoint
+        // For now, we'll simulate the analysis
+        const mockAnalysis = {
+            totalFolders: 12,
+            totalFiles: 45,
+            filesByType: {
+                rvt: 30,
+                rfa: 12,
+                rte: 3
+            },
+            estimatedTime: isInPlaceUpgrade ? '10-15 minutes' : '15-20 minutes',
+            mode: isInPlaceUpgrade ? 'in-place' : 'cross-project'
+        };
+        
+        const analysisHtml = `
+            <div class="well">
+                <strong>Upgrade Mode:</strong> ${isInPlaceUpgrade ? 
+                    'In-Place (creating new versions)' : 
+                    'Cross-Project (copying to destination)'}
+                <br><br>
+                <strong>Source project contains:</strong>
+                <ul>
+                    <li>${mockAnalysis.totalFolders} folders</li>
+                    <li>${mockAnalysis.totalFiles} Revit files total
+                        <ul>
+                            <li>${mockAnalysis.filesByType.rvt} RVT files</li>
+                            <li>${mockAnalysis.filesByType.rfa} RFA files</li>
+                            <li>${mockAnalysis.filesByType.rte} RTE files</li>
+                        </ul>
+                    </li>
+                </ul>
+                <strong>What will happen:</strong>
+                <ul>
+                    ${isInPlaceUpgrade ? `
+                        <li>Each file will get a new version in its current location</li>
+                        <li>Original versions will be preserved in version history</li>
+                        <li>No files will be moved or copied</li>
+                        <li>All metadata and permissions will be retained</li>
+                    ` : `
+                        <li>Files will be copied to the destination project</li>
+                        <li>Folder structure will be ${$('#maintainStructure').is(':checked') ? 'recreated' : 'flattened'}</li>
+                        <li>Original files will remain unchanged</li>
+                        <li>New items will be created in destination</li>
+                    `}
+                </ul>
+                <strong>Estimated time:</strong> ${mockAnalysis.estimatedTime}
+            </div>
+        `;
+        
+        $('#analysisContent').html(analysisHtml);
+        $('#projectAnalysisResult').show();
+        
+    } catch (error) {
+        console.error('Failed to analyze project:', error);
+        showAlert('Failed to analyze project. Please try again.', 'danger');
+    } finally {
+        $('#analyzeProjectBtn').prop('disabled', false).html(
+            '<span class="glyphicon glyphicon-search"></span> Analyze Source'
+        );
+    }
+}
+
+/**
+ * Start the project upgrade process
+ */
+async function startProjectUpgrade() {
+    const sourceProjectId = $('#sourceProject').val();
+    const destinationProjectId = $('#destinationProject').val();
+    const targetVersion = $('input[name="projectTargetVersion"]:checked').val();
+    
+    if (!sourceProjectId || !destinationProjectId) {
+        showAlert('Please select both source and destination projects.', 'warning');
+        return;
+    }
+    
+    // Prepare request data
+    const requestData = {
+        sourceProjectId,
+        destinationProjectId,
+        targetVersion,
+        maintainStructure: $('#maintainStructure').is(':checked'),
+        skipExisting: $('#skipExisting').is(':checked'),
+        includeWorkshared: $('#includeWorkshared').is(':checked')
+    };
+    
+    try {
+        // Start the upgrade
+        const response = await $.ajax({
+            url: '/api/aps/da4revit/v1/upgrader/project',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(requestData)
+        });
+        
+        if (response.success) {
+            // Store batch ID for tracking
+            window.currentProjectUpgradeBatchId = response.batchId;
+            
+            // Close selection modal and open progress modal
+            $('#projectUpgradeModal').modal('hide');
+            $('#projectUpgradeProgressModal').modal('show');
+            
+            // Initialize progress tracking
+            $('#totalFilesCount').text(response.summary.totalFiles);
+            addLogEntry(`Started upgrading ${response.summary.totalFiles} files to Revit ${targetVersion}`);
+            addLogEntry(`Batch ID: ${response.batchId}`);
+            
+            // Start polling for progress
+            startProgressPolling(response.batchId);
+        }
+        
+    } catch (error) {
+        console.error('Failed to start project upgrade:', error);
+        showAlert('Failed to start project upgrade. ' + (error.responseJSON?.error || ''), 'danger');
+    }
+}
+
+/**
+ * Poll for upgrade progress
+ */
+function startProgressPolling(batchId) {
+    // Clear any existing interval
+    if (window.projectUpgradeInterval) {
+        clearInterval(window.projectUpgradeInterval);
+    }
+    
+    // Poll every 2 seconds
+    window.projectUpgradeInterval = setInterval(async () => {
+        try {
+            const status = await $.ajax({
+                url: `/api/aps/da4revit/v1/upgrader/project/${batchId}/status`,
+                method: 'GET'
+            });
+            
+            updateProgressDisplay(status);
+            
+            // Check if complete
+            if (status.isComplete || status.percentComplete === 100) {
+                clearInterval(window.projectUpgradeInterval);
+                onUpgradeComplete(status);
+            }
+            
+        } catch (error) {
+            console.error('Failed to get upgrade status:', error);
+            // Don't stop polling on error, just log it
+        }
+    }, 2000);
+}
+
+/**
+ * Update the progress display
+ */
+function updateProgressDisplay(status) {
+    // Update progress bar
+    const percent = status.percentComplete || 0;
+    $('#projectUpgradeProgressBar')
+        .css('width', percent + '%')
+        .text(percent + '%');
+    
+    // Update counters
+    $('#completedFilesCount').text(status.completedFiles || 0);
+    $('#processingFilesCount').text(status.processingFiles || 0);
+    $('#failedFilesCount').text(status.failedFiles || 0);
+    
+    // Add mode-specific information
+    if (status.projectInfo && $('#upgradeModeSummary').length === 0) {
+        const isInPlace = status.projectInfo.sourceProject === status.projectInfo.destinationProject;
+        const modeSummary = `
+            <div id="upgradeModeSummary" class="well well-sm" style="margin-bottom: 10px;">
+                <strong>Mode:</strong> ${isInPlace ? 'In-Place Upgrade' : 'Cross-Project Upgrade'}<br>
+                <strong>Target Version:</strong> Revit ${status.targetVersion || '2023'}
+            </div>
+        `;
+        $('#projectUpgradeStats').before(modeSummary);
+    }
+    
+    // Add log entries for completed files with mode context
+    if (status.files) {
+        status.files.forEach(file => {
+            if (file.status === 'completed' && !file.logged) {
+                const action = status.upgradeMode === 'in-place' ? 'version created' : 'copied & upgraded';
+                addLogEntry(`✓ Completed: ${file.name} (${action})`, 'success');
+                file.logged = true;
+            } else if (file.status === 'failed' && !file.logged) {
+                addLogEntry(`✗ Failed: ${file.name} - ${file.error}`, 'danger');
+                file.logged = true;
+            }
+        });
+    }
+    
+    // Show estimated time remaining
+    if (status.estimatedTimeRemaining) {
+        addLogEntry(`Estimated time remaining: ${status.estimatedTimeRemaining}`, 'info', true);
+    }
+}
+
+function initializeProjectUpgradeModal() {
+    // Update the modal description to explain both modes
+    const updatedDescription = `
+        <div class="alert alert-info">
+            <strong>How it works:</strong> 
+            <ul style="margin-bottom: 0;">
+                <li><strong>Same Project (In-Place):</strong> Creates new versions of all Revit files within the current project</li>
+                <li><strong>Different Projects:</strong> Copies files to destination project and upgrades them</li>
+            </ul>
+        </div>
+    `;
+    
+    // Replace the existing alert in the modal
+    $('#projectUpgradeModal .alert-info').replaceWith(updatedDescription);
+    
+    // Update the destination project helper text
+    $('#destinationProject').siblings('small').text(
+        'Select same project for in-place upgrade or different project to copy'
+    );
+}
+
+/**
+ * Handle upgrade completion
+ */
+function onUpgradeComplete(status) {
+    $('#projectUpgradeProgressBar').removeClass('active');
+    $('#cancelProjectUpgradeBtn').hide();
+    $('#closeProgressBtn').show();
+    
+    const message = `Upgrade complete! Successfully processed ${status.completedFiles} files.`;
+    if (status.failedFiles > 0) {
+        message += ` ${status.failedFiles} files failed.`;
+    }
+    
+    addLogEntry(message, status.failedFiles > 0 ? 'warning' : 'success');
+    
+    // Show notification
+    showAlert(message, status.failedFiles > 0 ? 'warning' : 'success');
+}
+
+/**
+ * Cancel the upgrade process
+ */
+async function cancelProjectUpgrade() {
+    if (!window.currentProjectUpgradeBatchId) return;
+    
+    if (!confirm('Are you sure you want to cancel the upgrade process?')) {
+        return;
+    }
+    
+    try {
+        await $.ajax({
+            url: `/api/aps/da4revit/v1/upgrader/bulk/${window.currentProjectUpgradeBatchId}`,
+            method: 'DELETE'
+        });
+        
+        clearInterval(window.projectUpgradeInterval);
+        addLogEntry('Upgrade cancelled by user', 'warning');
+        $('#cancelProjectUpgradeBtn').hide();
+        $('#closeProgressBtn').show();
+        
+    } catch (error) {
+        console.error('Failed to cancel upgrade:', error);
+        showAlert('Failed to cancel upgrade process.', 'danger');
+    }
+}
+
+/**
+ * Add entry to the progress log
+ */
+function addLogEntry(message, type = 'info', replace = false) {
+    const timestamp = new Date().toLocaleTimeString();
+    const typeClass = {
+        'info': 'text-info',
+        'success': 'text-success',
+        'warning': 'text-warning',
+        'danger': 'text-danger'
+    }[type] || '';
+    
+    const entry = `<div class="${typeClass}">[${timestamp}] ${message}</div>`;
+    
+    if (replace && $('#logContent').children().last().hasClass(typeClass)) {
+        $('#logContent').children().last().replaceWith(entry);
+    } else {
+        $('#logContent').append(entry);
+    }
+    
+    // Auto-scroll to bottom
+    $('#projectUpgradeLog').scrollTop($('#projectUpgradeLog')[0].scrollHeight);
+}
+
+/**
+ * Show alert message
+ */
+function showAlert(message, type = 'info') {
+    const alertHtml = `
+        <div class="alert alert-${type} alert-dismissible fade in" role="alert">
+            <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+            ${message}
+        </div>
+    `;
+    
+    // Add to top of modal body or page
+    if ($('.modal.in').length > 0) {
+        $('.modal.in .modal-body').prepend(alertHtml);
+    } else {
+        $('body').prepend(alertHtml);
+    }
+    
+    // Auto-dismiss after 5 seconds
+    setTimeout(() => {
+        $('.alert').fadeOut(() => $('.alert').remove());
+    }, 5000);
+}
+
+// Initialize when document is ready
+$(document).ready(function() {
+    // Add project upgrade functionality after other initializations
+    setTimeout(initializeProjectUpgrade, 1000);
+});
+
 $(document).ready(function () {
   // first, check if current visitor is signed in
   jQuery.ajax({

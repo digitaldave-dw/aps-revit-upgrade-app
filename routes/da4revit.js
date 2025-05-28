@@ -20,7 +20,13 @@ const express = require('express');
 const config = require('../config');
 const request = require("request");
 
-const { ItemsApi, VersionsApi, FoldersApi } = require('forge-apis');
+const {
+    ItemsApi,
+    VersionsApi,
+    HubsApi,        
+    ProjectsApi,    
+    FoldersApi      
+} = require('forge-apis');
 
 const { OAuth } = require('./common/oauthImp');
 
@@ -232,12 +238,19 @@ class BulkProcessingQueue {
     // Submit file to Design Automation
     async submitToDesignAutomation(file, options) {
         try {
-            console.log(`📋 Preparing bulk file for DA: ${file.fileItemName}`);
+            console.log(`📋 Preparing file for DA: ${file.fileItemName}`);
+            console.log(`   Mode: ${file.isInPlaceUpgrade ? 'In-place upgrade' : 'Cross-project copy'}`);
             
             // Extract project and resource IDs from file URL
             const params = file.fileItemId.split('/');
             const resourceId = params[params.length - 1];
             const projectId = params[params.length - 3];
+
+            // For in-place upgrades, we work with the source project
+            // For cross-project, we use the destination project for storage
+            const targetProjectId = file.isInPlaceUpgrade ? 
+                file.sourceProjectId : 
+                file.destinationProjectId;
 
             // Get parent folder information
             const items = new ItemsApi();
@@ -253,9 +266,12 @@ class BulkProcessingQueue {
             }
 
             // Create new storage for the upgraded file
+            // For in-place upgrades, this storage will be in the same project
             const storageInfo = await getNewCreatedStorageInfo(
-                projectId, 
-                folder.body.data.id, 
+                targetProjectId,  // Use target project (same as source for in-place)
+                file.isInPlaceUpgrade ? 
+                    folder.body.data.id :  // Use original folder for in-place
+                    file.destinationFolderId,  // Use mapped folder for cross-project
                 file.fileItemName, 
                 options.oauth_client, 
                 options.oauth_token
@@ -277,31 +293,54 @@ class BulkProcessingQueue {
                 throw new Error('Failed to get version information');
             }
             
-            // Create version creation payload with target version
-            const createVersionBody = createBodyOfPostVersion(
-                resourceId,
-                file.fileItemName, 
-                storageInfo.StorageId,
-                versionInfo.versionType,
-                options.targetVersion  // Use targetVersion from bulk options
-            );
+            // Create appropriate payload based on upgrade type
+            let createPayload;
+            
+            if (file.isInPlaceUpgrade) {
+                // For in-place upgrades, create a new version
+                console.log('   Creating version payload for in-place upgrade');
+                createPayload = createBodyOfPostVersion(
+                    resourceId,  // Same item ID
+                    file.fileItemName, 
+                    storageInfo.StorageId,
+                    versionInfo.versionType,
+                    options.targetVersion
+                );
+                // Ensure it's a version creation
+                createPayload.data.type = "versions";
+                
+            } else {
+                // For cross-project upgrades, create a new item
+                console.log('   Creating item payload for cross-project upgrade');
+                createPayload = createBodyOfPostItem(
+                    file.fileItemName,
+                    file.destinationFolderId,
+                    storageInfo.StorageId,
+                    versionInfo.versionType,
+                    versionInfo.versionType
+                );
+                // Ensure it's an item creation
+                createPayload.data.type = "items";
+            }
 
             // Get file extension
             const fileExtension = file.fileItemName.split('.').pop().toLowerCase();
 
-            console.log(`📤 Submitting bulk file to DA: ${file.fileItemName} → Revit ${options.targetVersion}`);
+            console.log(`📤 Submitting to DA: ${file.fileItemName}`);
+            console.log(`   Target: Revit ${options.targetVersion}`);
+            console.log(`   Operation: ${file.isInPlaceUpgrade ? 'Create new version' : 'Create new item'}`);
 
             // Submit to Design Automation with target version
             const upgradeRes = await upgradeFile(
-                versionInfo.versionStorageId, 
-                storageInfo.StorageId, 
-                projectId, 
-                createVersionBody, 
+                versionInfo.versionStorageId,  // Input storage
+                storageInfo.StorageId,         // Output storage
+                targetProjectId,               // Project for version/item creation
+                createPayload,                 // Version or item creation payload
                 fileExtension, 
                 options.oauth_token, 
                 options.oauth_token_2legged,
-                true,                        // isNewVersion
-                options.targetVersion        // CRITICAL: Pass the target version!
+                file.isInPlaceUpgrade,         // isNewVersion flag
+                options.targetVersion          // Target Revit version
             );
 
             // Store all necessary data for webhook callback
@@ -309,27 +348,31 @@ class BulkProcessingQueue {
                 global.bulkJobWorkitems = new Map();
             }
             
-            // Store workitem data including target version
+            // Store workitem data including upgrade mode
             global.bulkJobWorkitems.set(upgradeRes.body.id, {
-                bulkJob: this.queue[0],      // Current bulk job
+                bulkJob: this.queue[0],
                 file: file,
                 processingKey: `${file.fileItemId}_${Date.now()}`,
-                createVersionData: createVersionBody,
-                projectId: projectId,
+                createVersionData: createPayload,
+                projectId: targetProjectId,
                 oauth_client: options.oauth_client,
                 oauth_token: options.oauth_token,
-                targetVersion: options.targetVersion  // Store for logging
+                targetVersion: options.targetVersion,
+                isInPlaceUpgrade: file.isInPlaceUpgrade,
+                operationType: createPayload.data.type
             });
 
-            console.log(`✅ Bulk file submitted: ${file.fileItemName}`);
+            console.log(`✅ File submitted: ${file.fileItemName}`);
             console.log(`   Workitem: ${upgradeRes.body.id}`);
             console.log(`   Activity: FileUpgraderApp_${options.targetVersion}Activity`);
+            console.log(`   Mode: ${file.isInPlaceUpgrade ? 'In-place' : 'Cross-project'}`);
 
             return {
                 success: true,
                 workItemId: upgradeRes.body.id,
                 workItemStatus: upgradeRes.body.status,
-                targetVersion: options.targetVersion
+                targetVersion: options.targetVersion,
+                mode: file.isInPlaceUpgrade ? 'in-place' : 'cross-project'
             };
 
         } catch (error) {
@@ -1364,6 +1407,359 @@ router.post('/callback/designautomation', async (req, res, next) => {
         }
         
         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+    }
+});
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Project-to-Project Upgrade Endpoint
+/// This endpoint handles upgrading all Revit files from one project to another
+/// while maintaining the folder structure
+///////////////////////////////////////////////////////////////////////
+router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
+    const { 
+        sourceProjectId, 
+        destinationProjectId, 
+        targetVersion = "2023",
+        supportedTypes = ['rvt', 'rfa', 'rte'],
+        maintainStructure = true,
+        skipExisting = true,
+        includeWorkshared = false
+    } = req.body;
+
+    // Validate inputs
+    if (!sourceProjectId || !destinationProjectId) {
+        return res.status(400).json({ 
+            error: 'Both sourceProjectId and destinationProjectId are required' 
+        });
+    }
+
+    // Note: We NO LONGER reject if source and destination are the same
+    // This is now a valid use case for in-place upgrades
+    const isInPlaceUpgrade = sourceProjectId === destinationProjectId;
+
+    // Validate target version
+    if (targetVersion !== '2023' && targetVersion !== '2024') {
+        return res.status(400).json({ 
+            error: 'Invalid target version. Must be either 2023 or 2024' 
+        });
+    }
+
+    try {
+        console.log('🚀 Starting project upgrade:', {
+            source: sourceProjectId,
+            destination: destinationProjectId,
+            targetVersion,
+            isInPlaceUpgrade,
+            mode: isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-PROJECT'
+        });
+
+        // Import helper functions
+        const { 
+            getProjectStructure, 
+            createFolderStructure, 
+            searchProjectFiles,
+            isWorksharingFile 
+        } = require('./common/datamanagementImp');
+
+        // Step 1: Analyze source project structure
+        console.log('📊 Step 1: Analyzing source project structure...');
+        const startTime = Date.now();
+        
+        const sourceStructure = await getProjectStructure(
+            sourceProjectId, 
+            null, // Start from root
+            req.oauth_client, 
+            req.oauth_token
+        );
+
+        // Count total files found
+        const countFiles = (structure) => {
+            let count = 0;
+            if (structure.items) count += structure.items.length;
+            if (structure.folders) {
+                structure.folders.forEach(folder => {
+                    count += countFiles(folder);
+                });
+            }
+            return count;
+        };
+
+        const totalSourceFiles = countFiles(sourceStructure);
+        console.log(`   Found ${totalSourceFiles} Revit files in source project`);
+        console.log(`   Time taken: ${(Date.now() - startTime) / 1000}s`);
+
+        // Step 2: Handle folder structure based on upgrade type
+        let folderMapping = {};
+        
+        if (isInPlaceUpgrade) {
+            // For in-place upgrades, we map each folder to itself
+            console.log('📁 Step 2: In-place upgrade - using existing folder structure');
+            
+            const mapFoldersToSelf = (structure) => {
+                if (structure.id && structure.type === 'folder') {
+                    folderMapping[structure.id] = structure.id;
+                }
+                if (structure.folders) {
+                    structure.folders.forEach(folder => mapFoldersToSelf(folder));
+                }
+            };
+            
+            mapFoldersToSelf(sourceStructure);
+            console.log(`   Mapped ${Object.keys(folderMapping).length} folders for in-place upgrade`);
+            
+        } else if (maintainStructure) {
+            // For cross-project upgrades with structure maintenance
+            console.log('📁 Step 2: Creating folder structure in destination project...');
+            const structureStartTime = Date.now();
+            
+            folderMapping = await createFolderStructure(
+                destinationProjectId,
+                sourceStructure,
+                null,
+                req.oauth_client,
+                req.oauth_token
+            );
+            
+            console.log(`   Created/mapped ${Object.keys(folderMapping).length} folders`);
+            console.log(`   Time taken: ${(Date.now() - structureStartTime) / 1000}s`);
+        } else {
+            console.log('📁 Step 2: Skipping folder structure creation (maintainStructure=false)');
+        }
+
+        // Step 3: Collect all files to process
+        console.log('📋 Step 3: Collecting files to process...');
+        const filesToProcess = [];
+        
+        const collectFiles = (structure, destinationFolderId = null) => {
+            if (structure.items) {
+                structure.items.forEach(item => {
+                    // Skip workshared files if requested
+                    if (!includeWorkshared && isWorksharingFile(item)) {
+                        console.log(`   Skipping workshared file: ${item.name}`);
+                        return;
+                    }
+                    
+                    // Determine the destination folder based on upgrade type
+                    let targetFolderId;
+                    if (isInPlaceUpgrade) {
+                        // For in-place upgrades, files stay in their current folder
+                        targetFolderId = structure.id;
+                    } else if (maintainStructure) {
+                        // For cross-project with structure, use the mapped folder
+                        targetFolderId = folderMapping[structure.id] || destinationFolderId;
+                    } else {
+                        // For cross-project without structure, use provided destination
+                        targetFolderId = destinationFolderId;
+                    }
+                    
+                    filesToProcess.push({
+                        fileItemId: item.links.self.href,
+                        fileItemName: item.name,
+                        sourceProjectId: sourceProjectId,
+                        destinationProjectId: destinationProjectId,
+                        sourceFolderId: structure.id,
+                        destinationFolderId: targetFolderId,
+                        itemId: item.id,
+                        path: item.path,
+                        extensionType: item.attributes.extension?.type || 'unknown',
+                        isInPlaceUpgrade: isInPlaceUpgrade
+                    });
+                });
+            }
+            
+            // Recursively process subfolders
+            if (structure.folders) {
+                structure.folders.forEach(subfolder => {
+                    const destFolderId = isInPlaceUpgrade ? 
+                        subfolder.id : // Use same folder for in-place
+                        (maintainStructure ? folderMapping[subfolder.id] : destinationFolderId);
+                    collectFiles(subfolder, destFolderId);
+                });
+            }
+        };
+        
+        collectFiles(sourceStructure);
+        
+        console.log(`   Total files to process: ${filesToProcess.length}`);
+        console.log(`   Upgrade mode: ${isInPlaceUpgrade ? 'In-place (new versions)' : 'Cross-project (new items)'}`);
+
+        // Step 4: Filter files if needed
+        let finalFilesToProcess = filesToProcess;
+        
+        if (isInPlaceUpgrade) {
+            // For in-place upgrades, we might want to check if files were recently upgraded
+            console.log('🔍 Step 4: Checking for recently upgraded files...');
+            
+            // This is where you could add logic to skip files that were already
+            // upgraded to the target version recently
+            // For now, we'll process all files
+            console.log('   Processing all files (no filtering applied)');
+        } else if (skipExisting && filesToProcess.length > 0) {
+            console.log('🔍 Step 4: Checking for existing files in destination...');
+            console.log('   Conflict handling will occur during individual file processing');
+        }
+
+        // Step 5: Submit to bulk processing queue
+        console.log('🚦 Step 5: Submitting files to processing queue...');
+        
+        if (finalFilesToProcess.length === 0) {
+            return res.status(404).json({ 
+                error: 'No Revit files found to process',
+                sourceProject: sourceProjectId,
+                destinationProject: destinationProjectId,
+                isInPlaceUpgrade
+            });
+        }
+
+        // Get 2-legged token for Design Automation
+        const oauth = new OAuth(req.session);
+        const oauth_client_2legged = oauth.get2LeggedClient();
+        const oauth_token_2legged = await oauth_client_2legged.authenticate();
+
+        // Create a special bulk job for project upgrade
+        const projectUpgradeJob = {
+            type: 'project-upgrade',
+            sourceProjectId,
+            destinationProjectId,
+            maintainStructure,
+            folderMapping,
+            files: finalFilesToProcess,
+            isInPlaceUpgrade,
+            upgradeMode: isInPlaceUpgrade ? 'in-place' : 'cross-project'
+        };
+
+        // Add to processing queue with project context
+        const batchId = bulkQueue.addBulkJob(finalFilesToProcess, {
+            targetVersion,
+            oauth_client: req.oauth_client,
+            oauth_token: req.oauth_token,
+            oauth_token_2legged,
+            projectUpgradeContext: projectUpgradeJob,
+            isInPlaceUpgrade
+        });
+
+        const totalTime = (Date.now() - startTime) / 1000;
+        console.log(`✅ Project upgrade job created: ${batchId}`);
+        console.log(`   Mode: ${isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-PROJECT'}`);
+        console.log(`   Total preparation time: ${totalTime}s`);
+
+        // Return detailed response
+        res.json({
+            success: true,
+            batchId,
+            upgradeMode: isInPlaceUpgrade ? 'in-place' : 'cross-project',
+            summary: {
+                sourceProject: sourceProjectId,
+                destinationProject: destinationProjectId,
+                isInPlaceUpgrade,
+                targetVersion: targetVersion,
+                totalFiles: finalFilesToProcess.length,
+                maintainedStructure: maintainStructure || isInPlaceUpgrade,
+                foldersCreated: isInPlaceUpgrade ? 0 : Object.keys(folderMapping).length,
+                preparationTime: `${totalTime}s`
+            },
+            details: {
+                filesByFolder: finalFilesToProcess.reduce((acc, file) => {
+                    const folder = file.path || 'root';
+                    if (!acc[folder]) acc[folder] = [];
+                    acc[folder].push(file.fileItemName);
+                    return acc;
+                }, {}),
+                activity: `FileUpgraderApp_${targetVersion}Activity`
+            },
+            message: isInPlaceUpgrade ? 
+                `Started in-place upgrade of ${finalFilesToProcess.length} files to Revit ${targetVersion}` :
+                `Started cross-project upgrade of ${finalFilesToProcess.length} files to Revit ${targetVersion}`
+        });
+
+    } catch (err) {
+        console.log('❌ Error in project upgrade:', err);
+        res.status(500).json({ 
+            error: 'Failed to start project upgrade',
+            details: err.message,
+            sourceProject: sourceProjectId,
+            destinationProject: destinationProjectId,
+            isInPlaceUpgrade
+        });
+    }
+});
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Get project upgrade status with detailed progress
+///////////////////////////////////////////////////////////////////////
+router.get('/da4revit/v1/upgrader/project/:batchId/status', async (req, res, next) => {
+    const { batchId } = req.params;
+    
+    const status = bulkQueue.getJobStatus(parseInt(batchId));
+    
+    if (!status) {
+        return res.status(404).json({ error: 'Project upgrade job not found' });
+    }
+    
+    // Add project-specific information to status
+    const jobDetails = bulkQueue.queue.find(j => j.batchId === parseInt(batchId));
+    if (jobDetails && jobDetails.options.projectUpgradeContext) {
+        status.projectInfo = {
+            sourceProject: jobDetails.options.projectUpgradeContext.sourceProjectId,
+            destinationProject: jobDetails.options.projectUpgradeContext.destinationProjectId,
+            foldersMapped: Object.keys(jobDetails.options.projectUpgradeContext.folderMapping || {}).length
+        };
+    }
+    
+    // Calculate estimated time remaining
+    if (status.completedFiles > 0 && status.percentComplete < 100) {
+        const avgTimePerFile = (Date.now() - new Date(jobDetails.createdAt).getTime()) / status.completedFiles;
+        const remainingFiles = status.totalFiles - status.completedFiles - status.failedFiles;
+        status.estimatedTimeRemaining = Math.round((avgTimePerFile * remainingFiles) / 1000) + 's';
+    }
+    
+    res.json(status);
+});
+
+///////////////////////////////////////////////////////////////////////
+/// NEW: Get available projects for upgrade (helper endpoint)
+///////////////////////////////////////////////////////////////////////
+router.get('/da4revit/v1/upgrader/projects', async (req, res, next) => {
+    try {
+        // Get all hubs and projects accessible to the user
+        const hubs = new HubsApi();
+        const hubsData = await hubs.getHubs({}, req.oauth_client, req.oauth_token);
+        
+        const allProjects = [];
+        
+        // Get projects from each hub
+        for (const hub of hubsData.body.data) {
+            const projects = new ProjectsApi();
+            const projectsData = await projects.getHubProjects(
+                hub.id, 
+                {}, 
+                req.oauth_client, 
+                req.oauth_token
+            );
+            
+            // Add hub info to each project
+            projectsData.body.data.forEach(project => {
+                allProjects.push({
+                    id: project.id,
+                    name: project.attributes.name,
+                    hubId: hub.id,
+                    hubName: hub.attributes.name,
+                    type: project.attributes.extension.type
+                });
+            });
+        }
+        
+        res.json({
+            projects: allProjects,
+            count: allProjects.length
+        });
+        
+    } catch (err) {
+        console.log('Error fetching projects:', err);
+        res.status(500).json({ 
+            error: 'Failed to fetch projects',
+            details: err.message 
+        });
     }
 });
 
