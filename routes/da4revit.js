@@ -1422,7 +1422,7 @@ router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
         targetVersion = "2023",
         supportedTypes = ['rvt', 'rfa', 'rte'],
         maintainStructure = true,
-        skipExisting = true,
+        skipExisting = false,
         includeWorkshared = false
     } = req.body;
 

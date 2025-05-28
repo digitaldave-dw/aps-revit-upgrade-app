@@ -103,7 +103,7 @@ function initializeProjectUpgrade() {
                                     </div>
                                     <div class="checkbox">
                                         <label>
-                                            <input type="checkbox" id="skipExisting" checked>
+                                            <input type="checkbox" id="skipExisting">
                                             Skip existing files
                                         </label>
                                     </div>
