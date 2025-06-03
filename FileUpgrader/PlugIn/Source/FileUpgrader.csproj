@@ -109,12 +109,7 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>
-xcopy /Y /F "$(ProjectDir)FileUpgraderApp.bundle\Contents\FileUpgrader.addin" "$(AppData)\Autodesk\REVIT\Addins\2023"
-xcopy /Y /F "$(ProjectDir)bin\Debug\FileUpgrader.dll" "$(AppData)\Autodesk\REVIT\Addins\2023”
-xcopy /Y /F "$(TargetDir)*.dll" "$(ProjectDir)FileUpgraderApp.bundle\Contents\"
-del /F "$(ProjectDir)..\..\..\public\bundles\FileUpgraderApp.zip"
-"C:\Program Files\7-Zip\7z.exe" a -tzip "$(ProjectDir)../../../public/bundles/FileUpgraderApp.zip" "$(ProjectDir)FileUpgraderApp.bundle\" -xr0!*.pdb
-</PostBuildEvent>
+    </PostBuildEvent>
   </PropertyGroup>
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
        Other similar extension points exist, see Microsoft.Common.targets.
