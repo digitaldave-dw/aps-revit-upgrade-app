@@ -5,519 +5,379 @@ using System.Collections.Generic;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.ApplicationServices;
 using DesignAutomationFramework;
+using Autodesk.Revit.DB.Events;
 
 namespace ADNPlugin.Revit.FileUpgrader2024
 {
-    internal class RuntimeValue
-    {
-        public static bool RunOnCloud { get; } = true;
-    }
-
-    /// <summary>
-    /// Custom failure preprocessor to handle errors during file operations
-    /// This runs BEFORE the main failure processor and can suppress or resolve failures
-    /// </summary>
-    public class FileUpgradeFailuresPreprocessor : IFailuresPreprocessor
-    {
-        public FailureProcessingResult PreprocessFailures(FailuresAccessor failuresAccessor)
-        {
-            IList<FailureMessageAccessor> failureMessages = failuresAccessor.GetFailureMessages();
-
-            // If no failures, continue normally
-            if (failureMessages.Count == 0)
-            {
-                return FailureProcessingResult.Continue;
-            }
-
-            Console.WriteLine($"Preprocessing {failureMessages.Count} failures...");
-
-            foreach (FailureMessageAccessor failure in failureMessages)
-            {
-                try
-                {
-                    FailureSeverity severity = failure.GetSeverity();
-                    string description = failure.GetDescriptionText();
-                    FailureDefinitionId failureId = failure.GetFailureDefinitionId();
-
-                    Console.WriteLine($"Failure: {severity} - {description}");
-                    if (failureId != null)
-                    {
-                        Console.WriteLine($"  Failure ID: {failureId.Guid}");
-                    }
-
-                    // For warnings, we can delete them
-                    if (severity == FailureSeverity.Warning)
-                    {
-                        failuresAccessor.DeleteWarning(failure);
-                        Console.WriteLine("  -> Deleted warning");
-                    }
-                    // For errors, try to resolve them
-                    else if (severity == FailureSeverity.Error)
-                    {
-                        // Check if Revit has a suggested resolution
-                        if (failure.HasResolutions())
-                        {
-                            failuresAccessor.ResolveFailure(failure);
-                            Console.WriteLine("  -> Applied default resolution");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"  -> Error processing failure: {ex.Message}");
-                }
-            }
-
-            // Always return Continue to let the main processor handle any remaining issues
-            return FailureProcessingResult.Continue;
-        }
-    }
-
-    /// <summary>
-    /// Main failure processor for handling errors that the preprocessor couldn't resolve
-    /// This completely replaces Revit's failure UI - essential for Design Automation
-    /// </summary>
-    public class FileUpgradeFailureProcessor : IFailuresProcessor
-    {
-        private int processingAttempts = 0;
-        private const int MAX_PROCESSING_ATTEMPTS = 5;
-
-        public FailureProcessingResult ProcessFailures(FailuresAccessor failuresAccessor)
-        {
-            IList<FailureMessageAccessor> failureMessages = failuresAccessor.GetFailureMessages();
-
-            // If no failures remain, we're done
-            if (failureMessages.Count == 0)
-            {
-                processingAttempts = 0;
-                return FailureProcessingResult.Continue;
-            }
-
-            // Check for infinite loop
-            processingAttempts++;
-            if (processingAttempts > MAX_PROCESSING_ATTEMPTS)
-            {
-                Console.WriteLine($"ERROR: Exceeded maximum processing attempts ({MAX_PROCESSING_ATTEMPTS})");
-                processingAttempts = 0;
-                return FailureProcessingResult.ProceedWithRollBack;
-            }
-
-            Console.WriteLine($"Processing {failureMessages.Count} remaining failures (Attempt {processingAttempts})...");
-
-            bool hasUnresolvedErrors = false;
-            bool madeChanges = false;
-
-            foreach (FailureMessageAccessor failure in failureMessages)
-            {
-                try
-                {
-                    FailureSeverity severity = failure.GetSeverity();
-                    string description = failure.GetDescriptionText();
-
-                    Console.WriteLine($"Failure: {severity} - {description}");
-
-                    if (severity == FailureSeverity.Error)
-                    {
-                        bool resolved = false;
-
-                        // Try to resolve with Revit's suggestion
-                        if (failure.HasResolutions())
-                        {
-                            try
-                            {
-                                failuresAccessor.ResolveFailure(failure);
-                                Console.WriteLine("  -> Resolved using default resolution");
-                                resolved = true;
-                                madeChanges = true;
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"  -> Failed to apply resolution: {ex.Message}");
-                            }
-                        }
-
-                        // If that didn't work, try to delete the problematic elements
-                        if (!resolved)
-                        {
-                            ICollection<ElementId> failingElementIds = failure.GetFailingElementIds();
-                            if (failingElementIds != null && failingElementIds.Count > 0)
-                            {
-                                try
-                                {
-                                    // Convert ICollection to IList as required by the API
-                                    IList<ElementId> elementList = failingElementIds.ToList();
-                                    failuresAccessor.DeleteElements(elementList);
-                                    Console.WriteLine($"  -> Deleted {elementList.Count} failing elements");
-                                    resolved = true;
-                                    madeChanges = true;
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"  -> Failed to delete elements: {ex.Message}");
-                                }
-                            }
-                        }
-
-                        // If still not resolved, we have a problem
-                        if (!resolved)
-                        {
-                            Console.WriteLine("  -> ERROR: Could not resolve failure");
-                            hasUnresolvedErrors = true;
-                        }
-                    }
-                    else if (severity == FailureSeverity.Warning)
-                    {
-                        // Delete any remaining warnings
-                        try
-                        {
-                            failuresAccessor.DeleteWarning(failure);
-                            Console.WriteLine("  -> Deleted warning");
-                            madeChanges = true;
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"  -> Could not delete warning: {ex.Message}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Unexpected error processing failure: {ex.Message}");
-                    hasUnresolvedErrors = true;
-                }
-            }
-
-            // Determine what to do next
-            if (hasUnresolvedErrors)
-            {
-                Console.WriteLine("Unresolved errors remain. Rolling back transaction.");
-                processingAttempts = 0;
-                return FailureProcessingResult.ProceedWithRollBack;
-            }
-            else if (madeChanges)
-            {
-                Console.WriteLine("Made changes. Requesting re-check.");
-                return FailureProcessingResult.ProceedWithCommit;
-            }
-            else
-            {
-                Console.WriteLine("No changes made. Continuing.");
-                return FailureProcessingResult.Continue;
-            }
-        }
-
-        public void Dismiss(Document document)
-        {
-            Console.WriteLine($"Dismiss called for document: {document?.Title ?? "null"}");
-            processingAttempts = 0;
-        }
-    }
-
     [Autodesk.Revit.Attributes.Regeneration(Autodesk.Revit.Attributes.RegenerationOption.Manual)]
     [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
     public class FileUpgradeApp : IExternalDBApplication
     {
-        // Store a reference to our failure processor so we can manage it properly
-        private static FileUpgradeFailureProcessor globalFailureProcessor = null;
+        // Store reference to our failure processor so we can unregister it later
+        private static FileUpgradeFailureProcessor _failureProcessor;
 
         public ExternalDBApplicationResult OnStartup(ControlledApplication application)
         {
-            if (RuntimeValue.RunOnCloud)
+            Console.WriteLine("==== FILE UPGRADER STARTUP ====");
+            LogWithTimestamp("Application startup initiated");
+
+            try
             {
+                // CRITICAL: Register the failure processor BEFORE any documents are opened
+                // This is the key difference - we need this registered before DA opens the document
+                _failureProcessor = new FileUpgradeFailureProcessor();
+
+                // Use the static method on Application class - this is the correct approach
+                Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(_failureProcessor);
+                LogWithTimestamp("Global failure processor registered successfully");
+
+                // Subscribe to DesignAutomationReadyEvent
                 DesignAutomationBridge.DesignAutomationReadyEvent += HandleDesignAutomationReadyEvent;
+                LogWithTimestamp("Subscribed to DesignAutomationReadyEvent");
+
+                return ExternalDBApplicationResult.Succeeded;
             }
-            else
+            catch (Exception ex)
             {
-                application.ApplicationInitialized += HandleApplicationInitializedEvent;
+                LogError("Failed during startup", ex);
+                return ExternalDBApplicationResult.Failed;
             }
-
-            // Note: We CANNOT register a global failure processor here because we don't have
-            // access to the Application object yet, only ControlledApplication.
-            // We'll register it when we get the Application object later.
-            Console.WriteLine("File upgrade app initialized");
-
-            return ExternalDBApplicationResult.Succeeded;
-        }
-
-        public void HandleApplicationInitializedEvent(object sender, Autodesk.Revit.DB.Events.ApplicationInitializedEventArgs e)
-        {
-            Application app = sender as Application;
-
-            // NOW we can register our global failure processor
-            RegisterGlobalFailureProcessor(app);
-
-            String filePath = Directory.GetCurrentDirectory() + @"\Change to your local legacy RFA file for local test";
-            DesignAutomationData data = new DesignAutomationData(app, filePath);
-            UpgradeFile(data);
         }
 
         public void HandleDesignAutomationReadyEvent(object sender, DesignAutomationReadyEventArgs e)
         {
-            // In Design Automation, register the failure processor with the application
-            if (e.DesignAutomationData?.RevitApp != null)
-            {
-                RegisterGlobalFailureProcessor(e.DesignAutomationData.RevitApp);
-            }
+            LogWithTimestamp("DesignAutomationReadyEvent fired");
 
-            e.Succeeded = true;
-            UpgradeFile(e.DesignAutomationData);
-        }
-
-        /// <summary>
-        /// Register our global failure processor with the Revit application
-        /// This replaces Revit's default failure UI with our automated handler
-        /// </summary>
-        private void RegisterGlobalFailureProcessor(Application app)
-        {
             try
             {
-                // Create our failure processor if we haven't already
-                if (globalFailureProcessor == null)
-                {
-                    globalFailureProcessor = new FileUpgradeFailureProcessor();
-                }
+                // Get the Revit version for logging
+                Application rvtApp = e.DesignAutomationData.RevitApp;
+                string versionInfo = $"Revit Version: {rvtApp.VersionNumber} Build: {rvtApp.VersionBuild}";
+                LogWithTimestamp(versionInfo);
 
-                // Register it globally - this affects ALL transactions in the session
-                Application.RegisterFailuresProcessor(globalFailureProcessor);
-                Console.WriteLine("Registered global failure processor successfully");
+                // Process the document (it's already open at this point)
+                e.Succeeded = ProcessDocument(e.DesignAutomationData);
+
+                if (e.Succeeded)
+                {
+                    LogWithTimestamp("Document processing completed successfully");
+                }
+                else
+                {
+                    LogError("Document processing failed");
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"WARNING: Could not register global failure processor: {ex.Message}");
-                // Continue anyway - individual transactions can still use preprocessors
+                LogError("Exception in DesignAutomationReadyEvent handler", ex);
+                e.Succeeded = false;
             }
         }
 
-        protected void UpgradeFile(DesignAutomationData data)
+        private bool ProcessDocument(DesignAutomationData data)
         {
-            Document doc = null;
-
             try
             {
-                Console.WriteLine("==== STARTING FILE UPGRADE PROCESS ====");
+                LogWithTimestamp("Starting document processing");
 
-                if (data == null)
-                    throw new ArgumentNullException(nameof(data));
-
-                Application rvtApp = data.RevitApp;
-                if (rvtApp == null)
-                    throw new InvalidDataException(nameof(rvtApp));
-
-                string modelPath = data.FilePath;
-                Console.WriteLine($"Processing file: {modelPath}");
-
-                if (String.IsNullOrWhiteSpace(modelPath))
-                    throw new InvalidDataException(nameof(modelPath));
-
-                doc = data.RevitDoc;
-
-                // Check if document opened successfully
+                Document doc = data.RevitDoc;
                 if (doc == null)
                 {
-                    Console.WriteLine("Document failed to open through DesignAutomationData");
-                    Console.WriteLine("This typically means the file has errors that prevented opening");
-
-                    // Try to open with audit mode
-                    Console.WriteLine("Attempting to open with audit mode enabled...");
-
-                    OpenOptions openOptions = new OpenOptions();
-                    openOptions.Audit = true;
-
-                    // For workshared files, detach and preserve worksets
-                    BasicFileInfo fileInfo = BasicFileInfo.Extract(modelPath);
-                    if (fileInfo.IsWorkshared)
-                    {
-                        Console.WriteLine("File is workshared - setting detach options");
-                        openOptions.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets;
-
-                        // Open all worksets
-                        WorksetConfiguration worksetConfig = new WorksetConfiguration(WorksetConfigurationOption.OpenAllWorksets);
-                        openOptions.SetOpenWorksetsConfiguration(worksetConfig);
-                    }
-
-                    // Convert string path to ModelPath
-                    ModelPath docPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(modelPath);
-
-                    try
-                    {
-                        doc = rvtApp.OpenDocumentFile(docPath, openOptions);
-                        Console.WriteLine("Successfully opened document with audit mode");
-                    }
-                    catch (Exception openEx)
-                    {
-                        Console.WriteLine($"Failed to open even with audit: {openEx.Message}");
-                        throw new InvalidOperationException("Could not open document even with audit mode", openEx);
-                    }
+                    LogError("Document is null - this should not happen");
+                    return false;
                 }
 
                 // Log document information
-                Console.WriteLine($"Document opened successfully");
-                Console.WriteLine($"Document Title: {doc.Title}");
-                Console.WriteLine($"Document Path: {doc.PathName}");
-                Console.WriteLine($"Is Workshared: {doc.IsWorkshared}");
-                Console.WriteLine($"Revit Version: {doc.Application.VersionName}");
+                LogWithTimestamp($"Document Title: {doc.Title}");
+                LogWithTimestamp($"Document Path: {doc.PathName}");
+                LogWithTimestamp($"Is Modified: {doc.IsModified}");
+                LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
+                LogWithTimestamp($"Is Detached: {doc.IsDetached}");
 
-                // Check if document was modified during opening (indicates fixes were applied)
-                if (doc.IsModified)
+                // Check if document has been successfully opened without critical errors
+                if (_failureProcessor.HasCriticalErrors)
                 {
-                    Console.WriteLine("Document was modified during opening (errors were fixed)");
+                    LogError("Document was opened with critical errors that could not be resolved");
+                    LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
+                    LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
+                    LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
+                    LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
                 }
-
-                // Determine output file path
-                string pathName = doc.PathName;
-                string[] pathParts = pathName.Split('\\');
-                string[] nameParts = pathParts[pathParts.Length - 1].Split('.');
-                string extension = nameParts[nameParts.Length - 1];
-                string outputFileName = "revitupgrade." + extension;
-                ModelPath outputPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputFileName);
-                Console.WriteLine($"Output path: {outputFileName}");
 
                 // Save the upgraded file
-                SaveUpgradedFile(doc, outputPath);
+                string outputPath = "revitupgrade.rvt";
+                LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
 
-                Console.WriteLine("==== FILE UPGRADE PROCESS COMPLETED ====");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"==== CRITICAL ERROR IN UPGRADE PROCESS: {ex.GetType().Name} ====");
-                Console.WriteLine($"Message: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
 
-                if (ex.InnerException != null)
+                SaveAsOptions saveOptions = new SaveAsOptions();
+                saveOptions.OverwriteExistingFile = true;
+                saveOptions.Compact = false; // Don't compact to save time
+                saveOptions.MaximumBackups = 1; // Minimize backups for DA
+
+                // Configure worksharing if needed
+                if (doc.IsWorkshared)
                 {
-                    Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-                    Console.WriteLine($"Inner stack trace: {ex.InnerException.StackTrace}");
-                }
-
-                throw;
-            }
-            finally
-            {
-                // Clean up - close document if it's open and we're not in DA
-                if (!RuntimeValue.RunOnCloud && doc != null && doc.IsValidObject)
-                {
-                    try
-                    {
-                        doc.Close(false);
-                    }
-                    catch { }
-                }
-            }
-        }
-
-        private void SaveUpgradedFile(Document doc, ModelPath outputPath)
-        {
-            Console.WriteLine("Preparing to save upgraded file...");
-
-            // Create save options
-            SaveAsOptions saveOpts = new SaveAsOptions();
-            saveOpts.OverwriteExistingFile = true;
-            saveOpts.Compact = false; // Don't compact to preserve structure and speed up save
-
-            // Set preview view if needed
-            try
-            {
-                if (doc.GetDocumentPreviewSettings().PreviewViewId.Equals(ElementId.InvalidElementId))
-                {
-                    Console.WriteLine("No preview view set, looking for 3D view...");
-
-                    View view = new FilteredElementCollector(doc)
-                        .OfClass(typeof(View))
-                        .Cast<View>()
-                        .Where(vw => vw.ViewType == ViewType.ThreeD && !vw.IsTemplate)
-                        .FirstOrDefault();
-
-                    if (view != null)
-                    {
-                        Console.WriteLine($"Setting preview view to: {view.Name}");
-                        saveOpts.PreviewViewId = view.Id;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error setting preview view: {ex.Message}");
-                // Non-critical, continue without preview
-            }
-
-            // Configure worksharing options if needed
-            if (doc.IsWorkshared)
-            {
-                Console.WriteLine("Configuring worksharing save options...");
-
-                try
-                {
+                    LogWithTimestamp("Document is workshared - configuring worksharing save options");
                     WorksharingSaveAsOptions wsOptions = new WorksharingSaveAsOptions();
                     wsOptions.SaveAsCentral = true;
                     wsOptions.OpenWorksetsDefault = SimpleWorksetConfiguration.AllWorksets;
+                    saveOptions.SetWorksharingOptions(wsOptions);
+                }
 
-                    saveOpts.SetWorksharingOptions(wsOptions);
-                    Console.WriteLine("Worksharing options configured");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error setting worksharing options: {ex.Message}");
-                    // Try to continue without special worksharing options
-                }
+                LogWithTimestamp("Saving upgraded file...");
+                var saveStart = DateTime.Now;
+                doc.SaveAs(modelPath, saveOptions);
+                var saveTime = (DateTime.Now - saveStart).TotalSeconds;
+                LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
+
+                // Log final statistics
+                LogWithTimestamp("=== UPGRADE STATISTICS ===");
+                LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
+                LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
+                LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
+                LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
+                LogWithTimestamp($"Dimension errors fixed: {_failureProcessor.DimensionErrorsFixed}");
+                LogWithTimestamp($"Network connectivity errors fixed: {_failureProcessor.NetworkErrorsFixed}");
+                LogWithTimestamp("========================");
+
+                return true;
             }
-
-            // Perform the save with failure handling
-            try
+            catch (Exception ex)
             {
-                // Use a transaction to ensure failure handling is active
-                // This gives us an extra layer of protection during save
-                using (Transaction saveTransaction = new Transaction(doc, "Save Upgraded File"))
-                {
-                    // Set up failure handling for the save operation
-                    // This preprocessor will handle any failures that occur during this specific transaction
-                    FailureHandlingOptions failureOptions = saveTransaction.GetFailureHandlingOptions();
-                    failureOptions.SetFailuresPreprocessor(new FileUpgradeFailuresPreprocessor());
-                    failureOptions.SetClearAfterRollback(true);
-                    saveTransaction.SetFailureHandlingOptions(failureOptions);
-
-                    // We don't actually need to make changes, just ensure the transaction is active
-                    saveTransaction.Start();
-                    saveTransaction.Commit();
-                }
-
-                // Now save the document
-                Console.WriteLine("Saving document...");
-                doc.SaveAs(outputPath, saveOpts);
-                Console.WriteLine("Document saved successfully!");
-            }
-            catch (Exception saveEx)
-            {
-                Console.WriteLine($"Primary save failed: {saveEx.Message}");
-
-                // Try a simpler save without the transaction
-                Console.WriteLine("Attempting simplified save...");
-                try
-                {
-                    SaveAsOptions simpleSaveOpts = new SaveAsOptions();
-                    simpleSaveOpts.OverwriteExistingFile = true;
-
-                    doc.SaveAs(outputPath, simpleSaveOpts);
-                    Console.WriteLine("Simplified save succeeded!");
-                }
-                catch (Exception fallbackEx)
-                {
-                    Console.WriteLine($"All save attempts failed: {fallbackEx.Message}");
-                    throw new InvalidOperationException("Could not save the upgraded file", fallbackEx);
-                }
+                LogError("Exception during document processing", ex);
+                return false;
             }
         }
 
         public ExternalDBApplicationResult OnShutdown(ControlledApplication application)
         {
-            // Clean up our global failure processor
-            if (globalFailureProcessor != null)
+            LogWithTimestamp("==== FILE UPGRADER SHUTDOWN ====");
+
+            try
             {
-                // Note: We can't unregister here because we don't have access to Application
-                // But it will be cleaned up when Revit shuts down
-                globalFailureProcessor = null;
+                // Unregister the failure processor to clean up
+                if (_failureProcessor != null)
+                {
+                    // Use the static method to unregister by passing null
+                    Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(null);
+                    LogWithTimestamp("Failure processor unregistered");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("Error during shutdown", ex);
             }
 
             return ExternalDBApplicationResult.Succeeded;
+        }
+
+        // Logging helper methods
+        private static void LogWithTimestamp(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
+        }
+
+        private static void LogError(string message, Exception ex = null)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ERROR: {message}");
+            if (ex != null)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception Type: {ex.GetType().Name}");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception Message: {ex.Message}");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Stack Trace: {ex.StackTrace}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Custom failure processor that handles all failures during the entire DA session,
+    /// including document opening failures which occur before any transaction context exists.
+    /// </summary>
+    public class FileUpgradeFailureProcessor : IFailuresProcessor
+    {
+        // Statistics for logging
+        public int TotalFailuresProcessed { get; private set; } = 0;
+        public int WarningsDeleted { get; private set; } = 0;
+        public int ErrorsResolved { get; private set; } = 0;
+        public int ElementsDeleted { get; private set; } = 0;
+        public int DimensionErrorsFixed { get; private set; } = 0;
+        public int NetworkErrorsFixed { get; private set; } = 0;
+        public bool HasCriticalErrors { get; private set; } = false;
+
+        // Known failure IDs that we handle specifically
+        private readonly HashSet<Guid> _knownFailureGuids = new HashSet<Guid>
+        {
+            new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"), // Dimension references not parallel
+            new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"), // Family network connectivity
+            new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173")  // Line is too short
+        };
+
+        public FailureProcessingResult ProcessFailures(FailuresAccessor failuresAccessor)
+        {
+            IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
+
+            if (failures.Count == 0)
+            {
+                return FailureProcessingResult.Continue;
+            }
+
+            TotalFailuresProcessed += failures.Count;
+            LogWithTimestamp($"Processing {failures.Count} failures");
+
+            // First pass: Delete all warnings
+            var warnings = failures.Where(f => f.GetSeverity() == FailureSeverity.Warning).ToList();
+            foreach (var warning in warnings)
+            {
+                try
+                {
+                    failuresAccessor.DeleteWarning(warning);
+                    WarningsDeleted++;
+                    LogWithTimestamp($"Deleted warning: {warning.GetDescriptionText()}");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Failed to delete warning: {warning.GetDescriptionText()}", ex);
+                }
+            }
+
+            // Second pass: Handle errors
+            var errors = failures.Where(f => f.GetSeverity() == FailureSeverity.Error).ToList();
+            foreach (var error in errors)
+            {
+                HandleError(failuresAccessor, error);
+            }
+
+            // Check if any critical errors remain
+            var remainingErrors = failuresAccessor.GetFailureMessages()
+                .Where(f => f.GetSeverity() == FailureSeverity.Error)
+                .ToList();
+
+            if (remainingErrors.Count > 0)
+            {
+                HasCriticalErrors = true;
+                LogError($"{remainingErrors.Count} errors could not be resolved");
+
+                // Log details of unresolved errors
+                foreach (var error in remainingErrors)
+                {
+                    LogError($"Unresolved error: {error.GetDescriptionText()}");
+                }
+            }
+
+            return FailureProcessingResult.Continue;
+        }
+
+        private void HandleError(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
+            string description = error.GetDescriptionText();
+            FailureDefinitionId failureId = error.GetFailureDefinitionId();
+            Guid failureGuid = failureId?.Guid ?? Guid.Empty;
+
+            LogWithTimestamp($"Processing error: {description}");
+            LogWithTimestamp($"Failure ID: {failureGuid}");
+
+            // Handle specific known failures
+            if (failureGuid == new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"))
+            {
+                // Dimension references not parallel
+                LogWithTimestamp("Detected dimension reference error - attempting to fix");
+                if (TryResolveOrDelete(failuresAccessor, error))
+                {
+                    DimensionErrorsFixed++;
+                    ErrorsResolved++;
+                }
+            }
+            else if (failureGuid == new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"))
+            {
+                // Family network connectivity
+                LogWithTimestamp("Detected network connectivity error - attempting to fix");
+                if (TryResolveOrDelete(failuresAccessor, error))
+                {
+                    NetworkErrorsFixed++;
+                    ErrorsResolved++;
+                }
+            }
+            else if (failureGuid == new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173"))
+            {
+                // Line is too short - usually safe to delete elements
+                LogWithTimestamp("Detected 'line too short' error - will delete elements");
+                if (TryDeleteFailingElements(failuresAccessor, error))
+                {
+                    ErrorsResolved++;
+                }
+            }
+            else
+            {
+                // Generic error handling
+                LogWithTimestamp("Unknown error type - attempting generic resolution");
+                if (TryResolveOrDelete(failuresAccessor, error))
+                {
+                    ErrorsResolved++;
+                }
+            }
+        }
+
+        private bool TryResolveOrDelete(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
+            // First try to resolve using available resolutions
+            if (error.HasResolutions())
+            {
+                try
+                {
+                    failuresAccessor.ResolveFailure(error);
+                    LogWithTimestamp("Successfully resolved error using default resolution");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogError("Failed to resolve error", ex);
+                }
+            }
+
+            // If resolution failed or unavailable, try to delete elements
+            return TryDeleteFailingElements(failuresAccessor, error);
+        }
+
+        private bool TryDeleteFailingElements(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
+            var failingElements = error.GetFailingElementIds();
+            if (failingElements != null && failingElements.Count > 0)
+            {
+                try
+                {
+                    failuresAccessor.DeleteElements(failingElements.ToList());
+                    ElementsDeleted += failingElements.Count;
+                    LogWithTimestamp($"Deleted {failingElements.Count} failing elements");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Failed to delete {failingElements.Count} elements", ex);
+                }
+            }
+            return false;
+        }
+
+        public void Dismiss(Document document)
+        {
+            // This method is called when the failure processing dialog would normally be dismissed
+            // We don't need to do anything here for DA
+            LogWithTimestamp("Failure processor dismissed");
+        }
+
+        private static void LogWithTimestamp(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] {message}");
+        }
+
+        private static void LogError(string message, Exception ex = null)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] ERROR: {message}");
+            if (ex != null)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] Exception: {ex.Message}");
+            }
         }
     }
 }

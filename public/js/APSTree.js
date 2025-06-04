@@ -16,669 +16,204 @@
 // UNINTERRUPTED OR ERROR FREE.
 /////////////////////////////////////////////////////////////////////
 
-/////////////////////////////////////////////////////////////////////
-// Enhanced APSTree.js with Bulk Processing Support
-// Copyright (c) Autodesk, Inc. All rights reserved
-/////////////////////////////////////////////////////////////////////
+// Global variables
+var bSupportRvt = true;
+var bSupportRfa = true;
+var bSupportRte = true;
+var bIgnore     = true;
+var bUpgrade2023= true;
 
-/**
- * Initialize project upgrade UI components
- * This sets up the modal dialog and event handlers for project selection
- */
-function initializeProjectUpgrade() {
-    // Add the project upgrade button to your UI
-    const upgradeButton = `
-        <button class="btn btn-primary" id="projectUpgradeBtn" style="margin-left: 10px;">
-            <span class="glyphicon glyphicon-transfer"></span> Upgrade Entire Project
-        </button>
-    `;
-    
-    // Add button next to existing upgrade button
-    $('#upgradeBtn').after(upgradeButton);
-    
-    // Create the project selection modal
-    const modalHtml = `
-        <div class="modal fade" id="projectUpgradeModal" tabindex="-1" role="dialog">
-            <div class="modal-dialog modal-lg" role="document">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                            <span aria-hidden="true">&times;</span>
-                        </button>
-                        <h4 class="modal-title">Project-to-Project Upgrade</h4>
-                    </div>
-                    <div class="modal-body">
-                        <div class="alert alert-info">
-                            <strong>How it works:</strong> This feature will upgrade all Revit files from the source project 
-                            to the selected Revit version and save them in the destination project, maintaining the folder structure.
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-6">
-                                <div class="form-group">
-                                    <label for="sourceProject">Source Project:</label>
-                                    <select class="form-control" id="sourceProject">
-                                        <option value="">Loading projects...</option>
-                                    </select>
-                                    <small class="text-muted">Select the project containing files to upgrade</small>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="form-group">
-                                    <label for="destinationProject">Destination Project:</label>
-                                    <select class="form-control" id="destinationProject">
-                                        <option value="">Loading projects...</option>
-                                    </select>
-                                    <small class="text-muted">Select where upgraded files will be saved</small>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-6">
-                                <div class="form-group">
-                                    <label>Target Revit Version:</label>
-                                    <div class="radio">
-                                        <label>
-                                            <input type="radio" name="projectTargetVersion" value="2023" checked>
-                                            Revit 2023
-                                        </label>
-                                    </div>
-                                    <div class="radio">
-                                        <label>
-                                            <input type="radio" name="projectTargetVersion" value="2024">
-                                            Revit 2024
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="form-group">
-                                    <label>Options:</label>
-                                    <div class="checkbox">
-                                        <label>
-                                            <input type="checkbox" id="maintainStructure" checked>
-                                            Maintain folder structure
-                                        </label>
-                                    </div>
-                                    <div class="checkbox">
-                                        <label>
-                                            <input type="checkbox" id="skipExisting">
-                                            Skip existing files
-                                        </label>
-                                    </div>
-                                    <div class="checkbox">
-                                        <label>
-                                            <input type="checkbox" id="includeWorkshared">
-                                            Include workshared files
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="row">
-                            <div class="col-md-12">
-                                <div id="projectAnalysisResult" style="display: none;">
-                                    <h5>Analysis Result:</h5>
-                                    <div id="analysisContent"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
-                        <button type="button" class="btn btn-info" id="analyzeProjectBtn">
-                            <span class="glyphicon glyphicon-search"></span> Analyze Source
-                        </button>
-                        <button type="button" class="btn btn-primary" id="startProjectUpgradeBtn" disabled>
-                            <span class="glyphicon glyphicon-play"></span> Start Upgrade
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Progress Modal -->
-        <div class="modal fade" id="projectUpgradeProgressModal" tabindex="-1" role="dialog" data-backdrop="static">
-            <div class="modal-dialog modal-lg" role="document">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h4 class="modal-title">Project Upgrade Progress</h4>
-                    </div>
-                    <div class="modal-body">
-                        <div class="progress">
-                            <div id="projectUpgradeProgressBar" class="progress-bar progress-bar-striped active" 
-                                 role="progressbar" style="width: 0%">
-                                <span class="sr-only">0% Complete</span>
-                            </div>
-                        </div>
-                        <div id="projectUpgradeStats" style="margin-top: 20px;">
-                            <div class="row">
-                                <div class="col-md-3 text-center">
-                                    <h3 id="totalFilesCount">0</h3>
-                                    <p>Total Files</p>
-                                </div>
-                                <div class="col-md-3 text-center">
-                                    <h3 id="completedFilesCount" class="text-success">0</h3>
-                                    <p>Completed</p>
-                                </div>
-                                <div class="col-md-3 text-center">
-                                    <h3 id="processingFilesCount" class="text-info">0</h3>
-                                    <p>Processing</p>
-                                </div>
-                                <div class="col-md-3 text-center">
-                                    <h3 id="failedFilesCount" class="text-danger">0</h3>
-                                    <p>Failed</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div id="projectUpgradeLog" style="max-height: 300px; overflow-y: auto; margin-top: 20px;">
-                            <h5>Processing Log:</h5>
-                            <div id="logContent"></div>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-warning" id="cancelProjectUpgradeBtn">
-                            <span class="glyphicon glyphicon-stop"></span> Cancel
-                        </button>
-                        <button type="button" class="btn btn-default" id="closeProgressBtn" style="display: none;">
-                            Close
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    // Add modals to body
-    $('body').append(modalHtml);
-    
-    // Setup event handlers
-    setupProjectUpgradeHandlers();
-}
+const FileLimitation = 5; // Keep for legacy mode
+var fileNumber = 0;
 
-/**
- * Setup all event handlers for project upgrade functionality
- */
-function setupProjectUpgradeHandlers() {
-    // Open modal button
-    $('#projectUpgradeBtn').click(function() {
-        $('#projectUpgradeModal').modal('show');
-        loadAvailableProjects();
-    });
-    
-    // Analyze project button
-    $('#analyzeProjectBtn').click(analyzeSourceProject);
-    
-    // Start upgrade button
-    $('#startProjectUpgradeBtn').click(startProjectUpgrade);
-    
-    // Cancel upgrade button
-    $('#cancelProjectUpgradeBtn').click(cancelProjectUpgrade);
-    
-    // Project selection validation
-    $('#sourceProject, #destinationProject').change(validateProjectSelection);
-}
+// Enhanced bulk processing variables
+var currentBatchId = null;
+var bulkProcessingActive = false;
+var bulkProgressInterval = null;
 
-/**
- * Load available projects for selection
- */
-async function loadAvailableProjects() {
-    try {
-        const response = await $.ajax({
-            url: '/api/aps/da4revit/v1/upgrader/projects',
-            method: 'GET'
-        });
-        
-        // When populating the dropdown, ensure the full ID is preserved
-        const projectOptions = '<option value="">-- Select a project --</option>' +
-            response.projects.map(project => {
-                // Make sure we're using the full project ID including "b." prefix
-                const fullProjectId = project.id.startsWith('b.') ? project.id : `b.${project.id}`;
-                
-                return `<option value="${fullProjectId}" data-hub="${project.hubId}">
-                    ${project.name} (${project.hubName})
-                </option>`;
-            }).join('');
-            
-        $('#sourceProject, #destinationProject').html(projectOptions);
-        
-    } catch (error) {
-        console.error('Failed to load projects:', error);
-    }
-}
+var totalFilesProcessed = 0;
+var fileQueue = [];
+var isProcessingQueue = false;
 
-/**
- * Validate project selection
- */
-function validateProjectSelection() {
-    const sourceId = $('#sourceProject').val();
-    const destId = $('#destinationProject').val();
-    
-    if (sourceId && destId) {
-        // Remove the restriction on same project selection
-        // Now both scenarios are valid:
-        // 1. Same project = in-place upgrade (create new versions)
-        // 2. Different projects = cross-project upgrade (copy and upgrade)
-        
-        // Update UI to show the mode
-        if (sourceId === destId) {
-            // Show in-place upgrade indicator
-            $('#upgradeMode').remove(); // Remove any existing indicator
-            
-            const modeIndicator = `
-                <div id="upgradeMode" class="alert alert-info" style="margin-top: 10px;">
-                    <strong>In-Place Upgrade Mode:</strong> Files will be upgraded within the same project. 
-                    New versions will be created for each file while preserving the original folder structure.
-                </div>
-            `;
-            
-            $('#destinationProject').closest('.form-group').after(modeIndicator);
-            
-            // Hide options that don't apply to in-place upgrades
-            $('#maintainStructure').prop('checked', true).prop('disabled', true);
-            $('#maintainStructure').closest('.checkbox').addClass('text-muted');
-            
-            // Update button text
-            $('#startProjectUpgradeBtn').html(
-                '<span class="glyphicon glyphicon-refresh"></span> Upgrade In Place'
-            );
-            
-        } else {
-            // Show cross-project upgrade indicator
-            $('#upgradeMode').remove();
-            
-            const modeIndicator = `
-                <div id="upgradeMode" class="alert alert-success" style="margin-top: 10px;">
-                    <strong>Cross-Project Upgrade Mode:</strong> Files will be copied from source to destination 
-                    project and upgraded. Original files remain unchanged.
-                </div>
-            `;
-            
-            $('#destinationProject').closest('.form-group').after(modeIndicator);
-            
-            // Re-enable options for cross-project mode
-            $('#maintainStructure').prop('disabled', false);
-            $('#maintainStructure').closest('.checkbox').removeClass('text-muted');
-            
-            // Update button text
-            $('#startProjectUpgradeBtn').html(
-                '<span class="glyphicon glyphicon-transfer"></span> Copy & Upgrade'
-            );
-        }
-        
-        // Enable the start button since selection is valid
-        $('#startProjectUpgradeBtn').prop('disabled', false);
-        
-    } else {
-        // No selection made yet
-        $('#upgradeMode').remove();
-        $('#startProjectUpgradeBtn').prop('disabled', true);
-    }
-}
+const ItemType = {
+  FILE : 1,
+  FOLDER: 2
+};
 
-/**
- * Analyze source project to show what will be upgraded
- */
-async function analyzeSourceProject() {
-    const sourceId = $('#sourceProject').val();
-    const destId = $('#destinationProject').val();
-    
-    if (!sourceId) {
-        showAlert('Please select a source project first.', 'warning');
-        return;
-    }
-    
-    const isInPlaceUpgrade = sourceId === destId;
-    
-    $('#analyzeProjectBtn').prop('disabled', true).html(
-        '<span class="glyphicon glyphicon-refresh spinning"></span> Analyzing...'
-    );
-    
-    try {
-        // In a real implementation, you would call an analysis endpoint
-        // For now, we'll simulate the analysis
-        const mockAnalysis = {
-            totalFolders: 12,
-            totalFiles: 45,
-            filesByType: {
-                rvt: 30,
-                rfa: 12,
-                rte: 3
-            },
-            estimatedTime: isInPlaceUpgrade ? '10-15 minutes' : '15-20 minutes',
-            mode: isInPlaceUpgrade ? 'in-place' : 'cross-project'
-        };
-        
-        const analysisHtml = `
-            <div class="well">
-                <strong>Upgrade Mode:</strong> ${isInPlaceUpgrade ? 
-                    'In-Place (creating new versions)' : 
-                    'Cross-Project (copying to destination)'}
-                <br><br>
-                <strong>Source project contains:</strong>
-                <ul>
-                    <li>${mockAnalysis.totalFolders} folders</li>
-                    <li>${mockAnalysis.totalFiles} Revit files total
-                        <ul>
-                            <li>${mockAnalysis.filesByType.rvt} RVT files</li>
-                            <li>${mockAnalysis.filesByType.rfa} RFA files</li>
-                            <li>${mockAnalysis.filesByType.rte} RTE files</li>
-                        </ul>
-                    </li>
-                </ul>
-                <strong>What will happen:</strong>
-                <ul>
-                    ${isInPlaceUpgrade ? `
-                        <li>Each file will get a new version in its current location</li>
-                        <li>Original versions will be preserved in version history</li>
-                        <li>No files will be moved or copied</li>
-                        <li>All metadata and permissions will be retained</li>
-                    ` : `
-                        <li>Files will be copied to the destination project</li>
-                        <li>Folder structure will be ${$('#maintainStructure').is(':checked') ? 'recreated' : 'flattened'}</li>
-                        <li>Original files will remain unchanged</li>
-                        <li>New items will be created in destination</li>
-                    `}
-                </ul>
-                <strong>Estimated time:</strong> ${mockAnalysis.estimatedTime}
-            </div>
-        `;
-        
-        $('#analysisContent').html(analysisHtml);
-        $('#projectAnalysisResult').show();
-        
-    } catch (error) {
-        console.error('Failed to analyze project:', error);
-        showAlert('Failed to analyze project. Please try again.', 'danger');
-    } finally {
-        $('#analyzeProjectBtn').prop('disabled', false).html(
-            '<span class="glyphicon glyphicon-search"></span> Analyze Source'
-        );
-    }
-}
+const LabelIdEndfix  = '-item';
+const CancelIdEndfix = '-cancel';
 
-/**
- * Start the project upgrade process
- */
-async function startProjectUpgrade() {
-    const sourceProjectId = $('#sourceProject').val();
-    const destinationProjectId = $('#destinationProject').val();
-    const targetVersion = $('input[name="projectTargetVersion"]:checked').val();
-    
-    if (!sourceProjectId || !destinationProjectId) {
-        showAlert('Please select both source and destination projects.', 'warning');
-        return;
-    }
-    
-    // Prepare request data
-    const requestData = {
-        sourceProjectId,
-        destinationProjectId,
-        targetVersion,
-        maintainStructure: $('#maintainStructure').is(':checked'),
-        skipExisting: $('#skipExisting').is(':checked'),
-        includeWorkshared: $('#includeWorkshared').is(':checked')
-    };
-    
-    try {
-        // Start the upgrade
-        const response = await $.ajax({
-            url: '/api/aps/da4revit/v1/upgrader/project',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify(requestData)
-        });
-        
-        if (response.success) {
-            // Store batch ID for tracking
-            window.currentProjectUpgradeBatchId = response.batchId;
-            
-            // Close selection modal and open progress modal
-            $('#projectUpgradeModal').modal('hide');
-            $('#projectUpgradeProgressModal').modal('show');
-            
-            // Initialize progress tracking
-            $('#totalFilesCount').text(response.summary.totalFiles);
-            addLogEntry(`Started upgrading ${response.summary.totalFiles} files to Revit ${targetVersion}`);
-            addLogEntry(`Batch ID: ${response.batchId}`);
-            
-            // Start polling for progress
-            startProgressPolling(response.batchId);
-        }
-        
-    } catch (error) {
-        console.error('Failed to start project upgrade:', error);
-        showAlert('Failed to start project upgrade. ' + (error.responseJSON?.error || ''), 'danger');
-    }
-}
+var workitemList    = new Array();
+var destinatedNode  = null;
+var sourceNode      = null;
 
-/**
- * Poll for upgrade progress
- */
-function startProgressPolling(batchId) {
-    // Clear any existing interval
-    if (window.projectUpgradeInterval) {
-        clearInterval(window.projectUpgradeInterval);
-    }
-    
-    // Poll every 2 seconds
-    window.projectUpgradeInterval = setInterval(async () => {
-        try {
-            const status = await $.ajax({
-                url: `/api/aps/da4revit/v1/upgrader/project/${batchId}/status`,
-                method: 'GET'
-            });
-            
-            updateProgressDisplay(status);
-            
-            // Check if complete
-            if (status.isComplete || status.percentComplete === 100) {
-                clearInterval(window.projectUpgradeInterval);
-                onUpgradeComplete(status);
-            }
-            
-        } catch (error) {
-            console.error('Failed to get upgrade status:', error);
-            // Don't stop polling on error, just log it
-        }
-    }, 2000);
-}
+const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
+const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
 
-/**
- * Update the progress display
- */
-function updateProgressDisplay(status) {
-    // Update progress bar
-    const percent = status.percentComplete || 0;
-    $('#projectUpgradeProgressBar')
-        .css('width', percent + '%')
-        .text(percent + '%');
-    
-    // Update counters
-    $('#completedFilesCount').text(status.completedFiles || 0);
-    $('#processingFilesCount').text(status.processingFiles || 0);
-    $('#failedFilesCount').text(status.failedFiles || 0);
-    
-    // Add mode-specific information
-    if (status.projectInfo && $('#upgradeModeSummary').length === 0) {
-        const isInPlace = status.projectInfo.sourceProject === status.projectInfo.destinationProject;
-        const modeSummary = `
-            <div id="upgradeModeSummary" class="well well-sm" style="margin-bottom: 10px;">
-                <strong>Mode:</strong> ${isInPlace ? 'In-Place Upgrade' : 'Cross-Project Upgrade'}<br>
-                <strong>Target Version:</strong> Revit ${status.targetVersion || '2023'}
-            </div>
-        `;
-        $('#projectUpgradeStats').before(modeSummary);
-    }
-    
-    // Add log entries for completed files with mode context
-    if (status.files) {
-        status.files.forEach(file => {
-            if (file.status === 'completed' && !file.logged) {
-                const action = status.upgradeMode === 'in-place' ? 'version created' : 'copied & upgraded';
-                addLogEntry(`✓ Completed: ${file.name} (${action})`, 'success');
-                file.logged = true;
-            } else if (file.status === 'failed' && !file.logged) {
-                addLogEntry(`✗ Failed: ${file.name} - ${file.error}`, 'danger');
-                file.logged = true;
-            }
-        });
-    }
-    
-    // Show estimated time remaining
-    if (status.estimatedTimeRemaining) {
-        addLogEntry(`Estimated time remaining: ${status.estimatedTimeRemaining}`, 'info', true);
-    }
-}
+// Initialize socket.io
+socketio = io();
 
-function initializeProjectUpgradeModal() {
-    // Update the modal description to explain both modes
-    const updatedDescription = `
-        <div class="alert alert-info">
-            <strong>How it works:</strong> 
-            <ul style="margin-bottom: 0;">
-                <li><strong>Same Project (In-Place):</strong> Creates new versions of all Revit files within the current project</li>
-                <li><strong>Different Projects:</strong> Copies files to destination project and upgrades them</li>
-            </ul>
-        </div>
-    `;
+// Socket handlers
+socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
+  console.log(data);
+  updateListItem(data.WorkitemId, data.Status);
+  
+  if(data.Status.toLowerCase() === 'completed' || 
+     data.Status.toLowerCase() === 'failed' || 
+     data.Status.toLowerCase() === 'cancelled'){
     
-    // Replace the existing alert in the modal
-    $('#projectUpgradeModal .alert-info').replaceWith(updatedDescription);
-    
-    // Update the destination project helper text
-    $('#destinationProject').siblings('small').text(
-        'Select same project for in-place upgrade or different project to copy'
-    );
-}
-
-/**
- * Handle upgrade completion
- */
-function onUpgradeComplete(status) {
-    $('#projectUpgradeProgressBar').removeClass('active');
-    $('#cancelProjectUpgradeBtn').hide();
-    $('#closeProgressBtn').show();
-    
-    const message = `Upgrade complete! Successfully processed ${status.completedFiles} files.`;
-    if (status.failedFiles > 0) {
-        message += ` ${status.failedFiles} files failed.`;
+    const index = workitemList.findIndex(item => item === data.WorkitemId);
+    if(index !== -1) {
+      workitemList.splice(index, 1);
     }
     
-    addLogEntry(message, status.failedFiles > 0 ? 'warning' : 'success');
+    totalFilesProcessed++;
     
-    // Show notification
-    showAlert(message, status.failedFiles > 0 ? 'warning' : 'success');
-}
-
-/**
- * Cancel the upgrade process
- */
-async function cancelProjectUpgrade() {
-    if (!window.currentProjectUpgradeBatchId) return;
-    
-    if (!confirm('Are you sure you want to cancel the upgrade process?')) {
-        return;
+    if(workitemList.length < FileLimitation && fileQueue.length > 0) {
+      processNextInQueue();
     }
-    
-    try {
-        await $.ajax({
-            url: `/api/aps/da4revit/v1/upgrader/bulk/${window.currentProjectUpgradeBatchId}`,
-            method: 'DELETE'
-        });
-        
-        clearInterval(window.projectUpgradeInterval);
-        addLogEntry('Upgrade cancelled by user', 'warning');
-        $('#cancelProjectUpgradeBtn').hide();
-        $('#closeProgressBtn').show();
-        
-    } catch (error) {
-        console.error('Failed to cancel upgrade:', error);
-        showAlert('Failed to cancel upgrade process.', 'danger');
-    }
-}
+  }
+  
+  if(workitemList.length === 0 && fileQueue.length === 0){
+    let upgradeBtnElm = document.getElementById('upgradeBtn');
+    upgradeBtnElm.disabled = false;
+    document.getElementById('upgradeTitle').innerHTML = 
+      `<h4>Upgrade Fully Completed! (${totalFilesProcessed} files processed)</h4>`;
 
-/**
- * Add entry to the progress log
- */
-function addLogEntry(message, type = 'info', replace = false) {
-    const timestamp = new Date().toLocaleTimeString();
-    const typeClass = {
-        'info': 'text-info',
-        'success': 'text-success',
-        'warning': 'text-warning',
-        'danger': 'text-danger'
-    }[type] || '';
+    fileNumber = 0;
+    totalFilesProcessed = 0;
     
-    const entry = `<div class="${typeClass}">[${timestamp}] ${message}</div>`;
-    
-    if (replace && $('#logContent').children().last().hasClass(typeClass)) {
-        $('#logContent').children().last().replaceWith(entry);
-    } else {
-        $('#logContent').append(entry);
+    if(sourceNode !== null){
+      let instance = $('#sourceHubs').jstree(true);
+      instance.refresh_node(sourceNode);
+      sourceNode = null;
     }
-    
-    // Auto-scroll to bottom
-    $('#projectUpgradeLog').scrollTop($('#projectUpgradeLog')[0].scrollHeight);
-}
-
-/**
- * Show alert message
- */
-function showAlert(message, type = 'info') {
-    const alertHtml = `
-        <div class="alert alert-${type} alert-dismissible fade in" role="alert">
-            <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-                <span aria-hidden="true">&times;</span>
-            </button>
-            ${message}
-        </div>
-    `;
-    
-    // Add to top of modal body or page
-    if ($('.modal.in').length > 0) {
-        $('.modal.in .modal-body').prepend(alertHtml);
-    } else {
-        $('body').prepend(alertHtml);
+    if(destinatedNode !== null ){
+      let instance = $('#destinationHubs').jstree(true);
+      instance.refresh_node(destinatedNode);
+      destinatedNode = null;
     }
-    
-    // Auto-dismiss after 5 seconds
-    setTimeout(() => {
-        $('.alert').fadeOut(() => $('.alert').remove());
-    }, 5000);
-}
-
-// Initialize when document is ready
-$(document).ready(function() {
-    // Add project upgrade functionality after other initializations
-    setTimeout(initializeProjectUpgrade, 1000);
+  }
 });
 
+socketio.on(SOCKET_TOPIC_BULK_PROGRESS, (data) => {
+  console.log('Bulk progress update:', data);
+  updateBulkProgress(data);
+});
+
+// Add CSS for spinning animation and custom styles
+const customStyles = `
+<style>
+.spinning {
+    -webkit-animation: spin 1s linear infinite;
+    -moz-animation: spin 1s linear infinite;
+    animation: spin 1s linear infinite;
+}
+
+@-moz-keyframes spin { 100% { -moz-transform: rotate(360deg); } }
+@-webkit-keyframes spin { 100% { -webkit-transform: rotate(360deg); } }
+@keyframes spin { 100% { -webkit-transform: rotate(360deg); transform:rotate(360deg); } }
+
+.analysis-panel {
+    background-color: #1e3a5f;
+    color: white;
+    padding: 15px;
+    border-radius: 5px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    margin: 10px 0;
+}
+
+.analysis-header {
+    color: #00bfff;
+    font-size: 14px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #4a6fa5;
+    padding-bottom: 5px;
+}
+
+.analysis-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    font-size: 13px;
+}
+
+.analysis-label {
+    flex: 1;
+}
+
+.analysis-value {
+    text-align: right;
+    min-width: 50px;
+    font-weight: bold;
+}
+
+.analysis-icon {
+    margin-left: 5px;
+    font-size: 14px;
+}
+
+.icon-success { color: #28a745; }
+.icon-info { color: #17a2b8; }
+.icon-warning { color: #ffc107; }
+.icon-danger { color: #dc3545; }
+.icon-locked { color: #6c757d; }
+
+/* Styles for workitem display */
+.list-group-item small {
+    font-size: 11px;
+    line-height: 1.3;
+}
+
+.list-group-item label {
+    margin-bottom: 0;
+    font-weight: normal;
+}
+
+#logStatus .list-group-item {
+    padding: 8px 10px;
+    margin-bottom: 3px;
+}
+
+/* Progress bar animation */
+.progress-bar {
+    -webkit-transition: width 0.6s ease;
+    -o-transition: width 0.6s ease;
+    transition: width 0.6s ease;
+}
+
+/* Ensure progress bar is visible */
+#projectUpgradeProgressBar {
+    min-width: 2em;
+}
+</style>
+`;
+
+// Add styles to head if not already present
+if (!$('#custom-apstree-styles').length) {
+    $('head').append(`<div id="custom-apstree-styles">${customStyles}</div>`);
+}
+
 $(document).ready(function () {
-  // first, check if current visitor is signed in
+  // Check if current visitor is signed in
   jQuery.ajax({
     url: '/api/aps/oauth/v1/token',
     success: function (res) {
-      // yes, it is signed in...
+      // User is signed in
       $('#autodeskSignOutButton').show();
       $('#autodeskSigninButton').hide();
-
       $('#refreshSourceHubs').show();
-      
-      // add right panel
       $('#refreshDestinationHubs').show();
 
-      // prepare sign out
+      // Prepare sign out
       $('#autodeskSignOutButton').click(function () {
         $('#hiddenFrame').on('load', function (event) {
           location.href = '/api/aps/oauth/v1/signout';
         });
         $('#hiddenFrame').attr('src', 'https://accounts.autodesk.com/Authentication/LogOut');
-      })
+      });
 
-      // and refresh button
+      // Refresh buttons
       $('#refreshSourceHubs').click(function () {
         $('#sourceHubs').jstree(true).refresh();
       });
@@ -687,8 +222,8 @@ $(document).ready(function () {
         $('#destinationHubs').jstree(true).refresh();
       });
 
-      prepareUserHubsTree( '#sourceHubs' );
-      prepareUserHubsTree( '#destinationHubs');
+      prepareUserHubsTree('#sourceHubs');
+      prepareUserHubsTree('#destinationHubs');
       showUser();
     },
     error: function(err){
@@ -704,7 +239,7 @@ $(document).ready(function () {
         location.href = url;
       }
     });
-  })
+  });
 
   $.getJSON("/api/aps/oauth/v1/clientid", function (res) {
     $("#ClientID").val(res.id);
@@ -722,7 +257,7 @@ $(document).ready(function () {
       alert('Can not get the selected source folder, please make sure you select a folder as source');
       return;
     }
-    destinatedNode  = $('#destinationHubs').jstree(true).get_selected(true)[0];
+    destinatedNode = $('#destinationHubs').jstree(true).get_selected(true)[0];
     if(destinatedNode === null){
       alert('Can not get the destinate folder, please make sure you select a folder as destination');
       return;
@@ -734,15 +269,14 @@ $(document).ready(function () {
     }
 
     // Get upgrade settings
-    bUpgrade2023 =  $('input[name="upgradeToVersion"]:checked').val() === '2023';
+    bUpgrade2023 = $('input[name="upgradeToVersion"]:checked').val() === '2023';
     const targetVersion = $('input[name="upgradeToVersion"]:checked').val();
-    bIgnore      =  $('input[name="fileExisted"]:checked').val() === 'skip';
+    bIgnore = $('input[name="fileExisted"]:checked').val() === 'skip';
 
     bSupportRvt = $('#supportRvtCbx')[0].checked;
     bSupportRfa = $('#supportRfaCbx')[0].checked;
     bSupportRte = $('#supportRteCbx')[0].checked;
 
-    // Get bulk processing preference
     const useBulkProcessing = $('#bulkProcessingCbx')[0].checked;
 
     // Clear previous logs
@@ -758,11 +292,9 @@ $(document).ready(function () {
     upgradeBtnElm.disabled = true;
 
     if (useBulkProcessing) {
-      // Use new bulk processing approach
       document.getElementById('upgradeTitle').innerHTML = "<h4>🚀 Starting Bulk Processing (No File Limit)...</h4>";
       await startBulkProcessing(sourceNode, destinatedNode, targetVersion);
     } else {
-      // Use original approach with 5-file limitation
       document.getElementById('upgradeTitle').innerHTML = "<h4>Start upgrading Revit files (Limited to 5 files)...</h4>";
       fileNumber = 0;
       await upgradeFolder(sourceNode, destinatedNode);
@@ -782,80 +314,487 @@ $(document).ready(function () {
       }
     }
   });
+
+  // Initialize project upgrade functionality
+  setTimeout(initializeProjectUpgrade, 1000);
 });
 
-var bSupportRvt = true;
-var bSupportRfa = true;
-var bSupportRte = true;
-var bIgnore     = true;
-var bUpgrade2023= true;
-
-// Remove hardcoded file limitation for bulk processing
-const FileLimitation = 5; // Keep for legacy mode
-var fileNumber = 0;
-
-// Enhanced bulk processing variables
-var currentBatchId = null;
-var bulkProcessingActive = false;
-var bulkProgressInterval = null;
-
-var totalFilesProcessed = 0;  // NEW: Track total files processed
-var fileQueue = [];            // NEW: Queue for pending files
-var isProcessingQueue = false; // NEW: Flag to prevent concurrent queue processing
-
-const ItemType = {
-  FILE : 1,
-  FOLDER: 2
-};
-
-const LabelIdEndfix  = '-item';
-const CancelIdEndfix = '-cancel';
-
-var workitemList    = new Array();
-var destinatedNode  = null;
-var sourceNode      = null;
-
-const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
-const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
-
-socketio = io();
-
-// Enhanced socket handling for both individual and bulk processing
-socketio = io();
-socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
-  console.log(data);
-  updateListItem(data.WorkitemId, data.Status);
+/**
+ * Create analysis panel with the requested format
+ */
+function createAnalysisPanel(stats, targetVersion, timeElapsed) {
+  const panel = `
+    <div class="analysis-panel">
+      <div class="analysis-header">📊 File Analysis Complete (${timeElapsed}s):</div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Total files scanned:</span>
+        <span class="analysis-value">${stats.totalFiles}</span>
+      </div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Revit files found:</span>
+        <span class="analysis-value">${stats.revitFiles || (stats.totalFiles || 0)}</span>
+      </div>
+      
+      <hr style="margin: 5px 0; border-color: #4a6fa5;">
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Files needing upgrade:</span>
+        <span class="analysis-value">${stats.needsUpgrade} <span class="analysis-icon icon-success">✓</span></span>
+      </div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Already at Revit ${targetVersion}:</span>
+        <span class="analysis-value">${stats.alreadyUpgraded} <span class="analysis-icon icon-info">■</span></span>
+      </div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Workshared files skipped:</span>
+        <span class="analysis-value">${stats.worksharedSkipped} <span class="analysis-icon icon-locked">🔒</span></span>
+      </div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Unsupported types:</span>
+        <span class="analysis-value">${stats.unsupportedTypes || 0} <span class="analysis-icon icon-danger">✗</span></span>
+      </div>
+      
+      <div class="analysis-row">
+        <span class="analysis-label">Version check errors:</span>
+        <span class="analysis-value">${stats.checkErrors || 0} <span class="analysis-icon icon-warning">⚠</span></span>
+      </div>
+      
+      <hr style="margin: 5px 0; border-color: #4a6fa5;">
+    </div>
+  `;
   
-  if(data.Status.toLowerCase() === 'completed' || 
-     data.Status.toLowerCase() === 'failed' || 
-     data.Status.toLowerCase() === 'cancelled'){
+  return panel;
+}
+
+/**
+ * Enhanced bulk processing with version detection feedback
+ */
+async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
+  try {
+    bulkProcessingActive = true;
     
-    // Properly remove the specific workitem
-    const index = workitemList.findIndex(item => item === data.WorkitemId);
-    if(index !== -1) {
-      workitemList.splice(index, 1);
+    const sourceParams = sourceNode.id.split('/');
+    const sourceFolderId = sourceParams[sourceParams.length - 1];
+    const projectId = sourceParams[sourceParams.length - 3];
+
+    const supportedTypes = [];
+    if (bSupportRvt) supportedTypes.push('rvt');
+    if (bSupportRfa) supportedTypes.push('rfa');
+    if (bSupportRte) supportedTypes.push('rte');
+
+    console.log('Starting optimized bulk processing:', {
+      projectId: projectId,
+      folderId: sourceFolderId,
+      targetVersion: targetVersion,
+      supportedTypes: supportedTypes
+    });
+
+    const logList = document.getElementById('logStatus');
+    logList.innerHTML = '';
+    
+    // Show analyzing status
+    addGroupListItem(
+      'Bulk Processing', 
+      'Analyzing folder and detecting file versions...', 
+      ItemType.FOLDER, 
+      'list-group-item-info',
+      null,
+      'bulk-analysis'
+    );
+
+    document.getElementById('upgradeTitle').innerHTML = 
+      '<h4>🔍 Analyzing Files and Detecting Versions...</h4>';
+
+    const startTime = Date.now();
+
+    // Start bulk processing
+    const response = await jQuery.ajax({
+      url: '/api/aps/da4revit/v1/upgrader/bulk',
+      method: 'POST',
+      contentType: 'application/json',
+      dataType: 'json',
+      data: JSON.stringify({
+        projectId: projectId,
+        folderId: sourceFolderId,
+        targetVersion: targetVersion,
+        supportedTypes: supportedTypes
+      })
+    });
+
+    const analysisTime = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    if (response.success) {
+      currentBatchId = response.batchId;
+      
+      logList.innerHTML = '';
+      
+      // Show analysis panel with the requested format
+      if (response.stats) {
+        const analysisPanel = createAnalysisPanel(response.stats, targetVersion, analysisTime);
+        logList.insertAdjacentHTML('afterbegin', analysisPanel);
+      }
+      
+      // Show performance gains
+      if (response.stats && (response.stats.alreadyUpgraded > 0 || response.stats.worksharedSkipped > 0)) {
+        const timeSaved = (response.stats.alreadyUpgraded + response.stats.worksharedSkipped) * 30;
+        addGroupListItem(
+          'Performance Optimization', 
+          `Saved ~${Math.round(timeSaved / 60)} minutes by intelligent filtering`, 
+          ItemType.FOLDER, 
+          'list-group-item-success'
+        );
+      }
+      
+      // Show skipped files details if any
+      if (response.skippedFiles && response.skippedFiles.alreadyUpgraded && response.skippedFiles.alreadyUpgraded.length > 0) {
+        const firstFew = response.skippedFiles.alreadyUpgraded.slice(0, 3);
+        firstFew.forEach(fileName => {
+          addGroupListItem(
+            `✓ ${fileName}`, 
+            `Already Revit ${targetVersion}`, 
+            ItemType.FILE, 
+            'list-group-item-success'
+          );
+        });
+        
+        if (response.skippedFiles.alreadyUpgraded.length > 3) {
+          addGroupListItem(
+            `... and ${response.skippedFiles.alreadyUpgraded.length - 3} more already upgraded files`, 
+            'SKIPPED', 
+            ItemType.FOLDER, 
+            'list-group-item-success'
+          );
+        }
+      }
+      
+      // Start processing if files need upgrade
+      if (response.filesToProcess > 0) {
+        document.getElementById('upgradeTitle').innerHTML = 
+          `<h4>🚀 Processing ${response.filesToProcess} files that need upgrade to Revit ${targetVersion}</h4>`;
+          
+        startBulkProgressMonitoring(currentBatchId);
+      } else {
+        document.getElementById('upgradeTitle').innerHTML = 
+          `<h4>✅ All files are already up to date!</h4>`;
+        bulkProcessingActive = false;
+        let upgradeBtnElm = document.getElementById('upgradeBtn');
+        upgradeBtnElm.disabled = false;
+      }
+      
+    } else {
+      throw new Error(response.error || 'Failed to start bulk processing');
     }
+
+  } catch (error) {
+    handleBulkProcessingError(error);
+  }
+}
+
+/**
+ * Handle bulk processing errors
+ */
+function handleBulkProcessingError(error) {
+  console.error('Bulk processing error:', error);
+  
+  let errorMessage = 'Unknown error';
+  
+  if (error.responseJSON) {
+    errorMessage = error.responseJSON.error || errorMessage;
     
-    totalFilesProcessed++;
-    
-    // Process next file in queue if available
-    if(workitemList.length < FileLimitation && fileQueue.length > 0) {
-      processNextInQueue();
+    if (error.responseJSON.message && error.responseJSON.message.includes('No files need upgrading')) {
+      const stats = error.responseJSON.stats;
+      
+      document.getElementById('logStatus').innerHTML = '';
+      
+      // Show analysis panel even for "no files need upgrade" case
+      if (stats) {
+        const analysisPanel = createAnalysisPanel(stats, error.responseJSON.targetVersion || '2023', '0.0');
+        document.getElementById('logStatus').insertAdjacentHTML('afterbegin', analysisPanel);
+      }
+      
+      addGroupListItem(
+        'No Upgrade Needed', 
+        'All files are already at the target version', 
+        ItemType.FOLDER, 
+        'list-group-item-success'
+      );
+      
+      document.getElementById('upgradeTitle').innerHTML = 
+        `<h4>✅ All files are up to date!</h4>`;
+      
+      let upgradeBtnElm = document.getElementById('upgradeBtn');
+      upgradeBtnElm.disabled = false;
+      bulkProcessingActive = false;
+      return;
     }
   }
   
-  // Check if all processing is complete
-  if(workitemList.length === 0 && fileQueue.length === 0){
-    let upgradeBtnElm = document.getElementById('upgradeBtn');
-    upgradeBtnElm.disabled = false;
-    document.getElementById('upgradeTitle').innerHTML = 
-      `<h4>Upgrade Fully Completed! (${totalFilesProcessed} files processed)</h4>`;
+  addGroupListItem('Bulk Processing', 'Failed: ' + errorMessage, ItemType.FOLDER, 'list-group-item-danger');
+  
+  let upgradeBtnElm = document.getElementById('upgradeBtn');
+  upgradeBtnElm.disabled = false;
+  bulkProcessingActive = false;
+  document.getElementById('upgradeTitle').innerHTML = `<h4>❌ Bulk Processing Failed: ${errorMessage}</h4>`;
+}
 
-    // Reset counters for next run
-    fileNumber = 0;
-    totalFilesProcessed = 0;
+/**
+ * Monitor bulk processing progress
+ */
+function startBulkProgressMonitoring(batchId) {
+  if (bulkProgressInterval) {
+    clearInterval(bulkProgressInterval);
+  }
+  
+  bulkProgressInterval = setInterval(async () => {
+    try {
+      const status = await $.ajax({
+        url: `/api/aps/da4revit/v1/upgrader/bulk/${batchId}/status`,
+        method: 'GET',
+        dataType: 'json'
+      });
+      
+      updateBulkProgress(status);
+      
+      if (status.status === 'completed' || status.percentComplete === 100) {
+        clearInterval(bulkProgressInterval);
+        finishBulkProcessing(status);
+      }
+      
+    } catch (error) {
+      console.error('Error getting bulk status:', error);
+    }
+  }, 2000);
+}
+
+/**
+ * Stop bulk progress monitoring
+ */
+function stopBulkProgressMonitoring() {
+  if (bulkProgressInterval) {
+    clearInterval(bulkProgressInterval);
+    bulkProgressInterval = null;
+  }
+}
+
+/**
+ * Update bulk processing progress
+ */
+function updateBulkProgress(data) {
+  const titleElement = document.getElementById('upgradeTitle');
+  const progressPercent = data.percentComplete || (data.totalFiles > 0 ? Math.round((data.completedFiles / data.totalFiles) * 100) : 0);
+  
+  titleElement.innerHTML = `
+    <h4>📊 Processing Progress: ${data.completedFiles}/${data.totalFiles} files (${progressPercent}%)</h4>
+    <div class="progress" style="margin: 10px 0; height: 25px;">
+      <div class="progress-bar progress-bar-success progress-bar-striped active" 
+           role="progressbar" 
+           style="width: ${progressPercent}%; line-height: 25px;">
+        ${progressPercent}%
+      </div>
+    </div>
+    <div style="display: flex; justify-content: space-between; font-size: 12px;">
+      <span>✅ Completed: ${data.completedFiles}</span>
+      <span>🔄 Processing: ${data.processingFiles || 0}</span>
+      <span>⏳ Queued: ${data.queuedFiles || 0}</span>
+      <span>❌ Failed: ${data.failedFiles || 0}</span>
+    </div>
+  `;
+
+  // Check if processing is complete
+  if (data.isComplete || progressPercent === 100) {
+    finishBulkProcessing(data);
+    return;
+  }
+
+  if (data.files && data.files.length > 0) {
+    updateBulkFileList(data.files);
+  }
+  
+  if (data.processingFiles > 0 && data.completedFiles > 0) {
+    const avgTimePerFile = 30;
+    const remainingFiles = data.totalFiles - data.completedFiles - data.failedFiles;
+    const estimatedSeconds = remainingFiles * avgTimePerFile;
+    const estimatedMinutes = Math.ceil(estimatedSeconds / 60);
     
-    // Refresh the tree nodes
+    titleElement.innerHTML += `
+      <div style="margin-top: 5px; font-size: 12px; color: #666;">
+        Estimated time remaining: ~${estimatedMinutes} minutes
+      </div>
+    `;
+  }
+}
+
+/**
+ * Update bulk file list
+ */
+function updateBulkFileList(files) {
+  const logList = document.getElementById('logStatus');
+  
+  // Keep the analysis panel at the top
+  const analysisPanel = logList.querySelector('.analysis-panel');
+  
+  // Clear file entries but keep analysis panel
+  const entries = Array.from(logList.children);
+  entries.forEach(entry => {
+    if (!entry.classList.contains('analysis-panel') && entry.getAttribute('data-file-status')) {
+      entry.remove();
+    }
+  });
+
+  const filesByStatus = {
+    completed: files.filter(f => f.status === 'completed'),
+    processing: files.filter(f => f.status === 'processing' || f.status === 'submitted'),
+    queued: files.filter(f => f.status === 'queued'),
+    failed: files.filter(f => f.status === 'failed')
+  };
+
+  // Show current processing files
+  filesByStatus.processing.slice(0, 3).forEach(file => {
+    const li = createFileStatusEntry(file.name, 'PROCESSING', 'list-group-item-info', file.workItemId);
+    li.setAttribute('data-file-status', 'processing');
+    logList.appendChild(li);
+  });
+
+  // Show recent completions
+  filesByStatus.completed.slice(-5).reverse().forEach(file => {
+    const li = createFileStatusEntry(file.name, 'COMPLETED', 'list-group-item-success', file.workItemId);
+    li.setAttribute('data-file-status', 'completed');
+    logList.appendChild(li);
+  });
+
+  // Show failures
+  filesByStatus.failed.forEach(file => {
+    const errorText = file.error ? `FAILED: ${file.error}` : 'FAILED';
+    const li = createFileStatusEntry(file.name, errorText, 'list-group-item-danger', file.workItemId);
+    li.setAttribute('data-file-status', 'failed');
+    logList.appendChild(li);
+  });
+
+  // Show queue summary
+  if (filesByStatus.queued.length > 0) {
+    addGroupListItem(
+      `⏳ ${filesByStatus.queued.length} files in queue`, 
+      'Waiting to process', 
+      ItemType.FOLDER, 
+      'list-group-item-warning'
+    );
+  }
+}
+
+/**
+ * Create file status entry
+ */
+function createFileStatusEntry(fileName, status, cssClass, workItemId) {
+  const li = document.createElement('li');
+  li.className = 'list-group-item ' + cssClass;
+  li.style.padding = '5px 10px';
+  li.style.fontSize = '12px';
+  
+  const timestamp = new Date().toLocaleTimeString();
+  // Extract just the GUID from workitem ID
+  const shortId = workItemId ? extractWorkitemGuid(workItemId) : '';
+  
+  li.innerHTML = `
+    <span class="glyphicon glyphicon-file" style="margin-right: 5px;"></span>
+    ${fileName}
+    <span class="pull-right">${status}</span>
+    <small class="text-muted" style="display: block; margin-top: 2px;">
+      ${timestamp} ${shortId ? `(ID: ${shortId})` : ''}
+    </small>
+  `;
+  
+  return li;
+}
+
+/**
+ * Extract GUID from full workitem ID
+ */
+function extractWorkitemGuid(fullId) {
+  // If it's already just a GUID, return it
+  if (!fullId.includes(':')) {
+    return fullId;
+  }
+  // Extract GUID from ARN format: arn:adsk.wipprod:fs.workitem:GUID
+  const parts = fullId.split(':');
+  return parts[parts.length - 1];
+}
+
+/**
+ * Finish bulk processing
+ */
+function finishBulkProcessing(finalStatus) {
+  bulkProcessingActive = false;
+  currentBatchId = null;
+  
+  stopBulkProgressMonitoring();
+  
+  let upgradeBtnElm = document.getElementById('upgradeBtn');
+  upgradeBtnElm.disabled = false;
+  
+  const successCount = finalStatus.completedFiles || 0;
+  const failedCount = finalStatus.failedFiles || 0;
+  const totalCount = finalStatus.totalFiles || 0;
+  
+  let statusMessage, statusIcon, statusClass;
+  
+  if (failedCount === 0 && successCount === totalCount) {
+    statusMessage = `All ${successCount} files upgraded successfully!`;
+    statusIcon = '🎉';
+    statusClass = 'success';
+  } else if (successCount === 0) {
+    statusMessage = `All ${totalCount} files failed to upgrade`;
+    statusIcon = '❌';
+    statusClass = 'danger';
+  } else {
+    statusMessage = `Completed with ${successCount} successes and ${failedCount} failures`;
+    statusIcon = '⚠️';
+    statusClass = 'warning';
+  }
+  
+  document.getElementById('upgradeTitle').innerHTML = `
+    <h4>${statusIcon} ${statusMessage}</h4>
+    <div class="panel panel-${statusClass}" style="margin-top: 15px;">
+      <div class="panel-heading">
+        <h3 class="panel-title">Final Results</h3>
+      </div>
+      <div class="panel-body">
+        <div class="row">
+          <div class="col-md-3 text-center">
+            <h3>${totalCount}</h3>
+            <p>Total Files</p>
+          </div>
+          <div class="col-md-3 text-center">
+            <h3 class="text-success">${successCount}</h3>
+            <p>Successful</p>
+          </div>
+          <div class="col-md-3 text-center">
+            <h3 class="text-danger">${failedCount}</h3>
+            <p>Failed</p>
+          </div>
+          <div class="col-md-3 text-center">
+            <h3 class="text-info">${Math.round((successCount / totalCount) * 100)}%</h3>
+            <p>Success Rate</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('queueStatus').innerHTML = '';
+
+  addGroupListItem(
+    'Bulk Processing Complete', 
+    statusMessage, 
+    ItemType.FOLDER, 
+    `list-group-item-${statusClass}`
+  );
+
+  setTimeout(() => {
     if(sourceNode !== null){
       let instance = $('#sourceHubs').jstree(true);
       instance.refresh_node(sourceNode);
@@ -866,16 +805,41 @@ socketio.on(SOCKET_TOPIC_WORKITEM, async (data)=>{
       instance.refresh_node(destinatedNode);
       destinatedNode = null;
     }
+  }, 2000);
+}
+
+/**
+ * Cancel bulk processing
+ */
+async function cancelBulkProcessing() {
+  if (!currentBatchId) return;
+  
+  try {
+    await jQuery.ajax({
+      url: `/api/aps/da4revit/v1/upgrader/bulk/${currentBatchId}`,
+      method: 'DELETE',
+      dataType: 'json'
+    });
+    
+    stopBulkProgressMonitoring();
+    bulkProcessingActive = false;
+    currentBatchId = null;
+    
+    let upgradeBtnElm = document.getElementById('upgradeBtn');
+    upgradeBtnElm.disabled = false;
+    
+    document.getElementById('upgradeTitle').innerHTML = "<h4>🛑 Bulk Processing Cancelled</h4>";
+    addGroupListItem('Bulk Processing', 'Cancelled by user', ItemType.FOLDER, 'list-group-item-warning');
+    
+  } catch (error) {
+    console.error('Error cancelling bulk processing:', error);
+    addGroupListItem('Cancel Operation', 'Failed: ' + error.message, ItemType.FOLDER, 'list-group-item-danger');
   }
-});
+}
 
-// New socket handler for bulk processing progress
-socketio.on(SOCKET_TOPIC_BULK_PROGRESS, (data) => {
-  console.log('Bulk progress update:', data);
-  updateBulkProgress(data);
-});
-
-// New function to process next file in queue
+/**
+ * Process next file in queue
+ */
 async function processNextInQueue() {
   if(isProcessingQueue || fileQueue.length === 0) return;
   
@@ -895,7 +859,6 @@ async function processNextInQueue() {
         addGroupListItem(node.text, 'failed', ItemType.FILE, 'list-group-item-danger');
         totalFilesProcessed++;
         
-        // Try next file even if this one failed
         if(fileQueue.length > 0) {
           setTimeout(() => processNextInQueue(), 100);
         }
@@ -906,359 +869,9 @@ async function processNextInQueue() {
   }
 }
 
-// New bulk processing function
-async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
-  try {
-    bulkProcessingActive = true;
-    
-    // Extract IDs from the source node
-    const sourceParams = sourceNode.id.split('/');
-    const sourceFolderId = sourceParams[sourceParams.length - 1];
-    const projectId = sourceParams[sourceParams.length - 3];
-
-    // Create file filter based on supported file types
-    const supportedTypes = [];
-    if (bSupportRvt) supportedTypes.push('rvt');
-    if (bSupportRfa) supportedTypes.push('rfa');
-    if (bSupportRte) supportedTypes.push('rte');
-
-    console.log('Starting bulk processing:', {
-      projectId: projectId,
-      folderId: sourceFolderId,
-      targetVersion: targetVersion,
-      supportedTypes: supportedTypes
-    });
-
-    // Clear the log and show initial status
-    const logList = document.getElementById('logStatus');
-    logList.innerHTML = '';
-    
-    addGroupListItem(
-      'Bulk Processing', 
-      'Analyzing folder contents...', 
-      ItemType.FOLDER, 
-      'list-group-item-info'
-    );
-
-    // Start bulk processing with the source folder
-    const response = await jQuery.ajax({
-      url: '/api/aps/da4revit/v1/upgrader/bulk',
-      method: 'POST',
-      contentType: 'application/json',
-      dataType: 'json',
-      data: JSON.stringify({
-        projectId: projectId,
-        folderId: sourceFolderId,
-        targetVersion: targetVersion,
-        supportedTypes: supportedTypes
-      })
-    });
-
-    if (response.success) {
-      currentBatchId = response.batchId;
-      
-      // Clear initial status
-      logList.innerHTML = '';
-      
-      // Show summary including workshared files
-      addGroupListItem(
-        'Bulk Processing Started', 
-        `Processing ${response.totalFiles} files`, 
-        ItemType.FOLDER, 
-        'list-group-item-success'
-      );
-      
-      // Show workshared file warning if any were excluded
-      if (response.excludedWorksharedCount > 0) {
-        addGroupListItem(
-          'Workshared Files Excluded', 
-          `${response.excludedWorksharedCount} workshared files cannot be upgraded`, 
-          ItemType.FOLDER, 
-          'list-group-item-warning'
-        );
-        
-        // List the first few excluded files
-        response.excludedFiles.slice(0, 3).forEach(fileName => {
-          addGroupListItem(
-            `🔒 ${fileName}`, 
-            'WORKSHARED - EXCLUDED', 
-            ItemType.FILE, 
-            'list-group-item-warning'
-          );
-        });
-        
-        if (response.excludedFiles.length > 3) {
-          addGroupListItem(
-            `... and ${response.excludedFiles.length - 3} more workshared files`, 
-            'EXCLUDED', 
-            ItemType.FOLDER, 
-            'list-group-item-warning'
-          );
-        }
-      }
-      
-      // Show file list for processing
-      if (response.files && response.files.length > 0) {
-        response.files.forEach((fileName, index) => {
-          if (index < 10) { // Show first 10 files
-            addGroupListItem(fileName, 'QUEUED', ItemType.FILE, 'list-group-item-info');
-          }
-        });
-        
-        if (response.files.length > 10) {
-          addGroupListItem(
-            `... and ${response.files.length - 10} more files`, 
-            'QUEUED', 
-            ItemType.FOLDER, 
-            'list-group-item-info'
-          );
-        }
-      }
-      
-      document.getElementById('upgradeTitle').innerHTML = 
-        `<h4>🚀 Bulk Processing: ${response.totalFiles} files queued` +
-        (response.excludedWorksharedCount > 0 ? 
-         ` (${response.excludedWorksharedCount} workshared excluded)` : '') +
-        `</h4>`;
-      
-    } else {
-      throw new Error(response.error || 'Failed to start bulk processing');
-    }
-
-  } catch (error) {
-    console.error('Bulk processing error:', error);
-    
-    let errorMessage = 'Unknown error';
-    let excludedInfo = '';
-    
-    if (error.responseJSON) {
-      errorMessage = error.responseJSON.error || errorMessage;
-      
-      // Check if all files were workshared
-      if (error.responseJSON.excludedWorksharedCount > 0) {
-        excludedInfo = ` (${error.responseJSON.excludedWorksharedCount} workshared files were found but cannot be processed)`;
-        
-        // Show the excluded files if available
-        if (error.responseJSON.excludedWorksharedFiles) {
-          logList.innerHTML = '';
-          addGroupListItem(
-            'No Upgradeable Files', 
-            'All Revit files in this folder are workshared', 
-            ItemType.FOLDER, 
-            'list-group-item-danger'
-          );
-          
-          error.responseJSON.excludedWorksharedFiles.slice(0, 5).forEach(fileName => {
-            addGroupListItem(
-              `🔒 ${fileName}`, 
-              'WORKSHARED - CANNOT UPGRADE', 
-              ItemType.FILE, 
-              'list-group-item-warning'
-            );
-          });
-        }
-      }
-    }
-    
-    addGroupListItem('Bulk Processing', 'Failed: ' + errorMessage + excludedInfo, ItemType.FOLDER, 'list-group-item-danger');
-    
-    let upgradeBtnElm = document.getElementById('upgradeBtn');
-    upgradeBtnElm.disabled = false;
-    bulkProcessingActive = false;
-    document.getElementById('upgradeTitle').innerHTML = `<h4>❌ Bulk Processing Failed: ${errorMessage}</h4>`;
-  }
-}
-
-// Stop bulk progress monitoring
-function stopBulkProgressMonitoring() {
-  if (bulkProgressInterval) {
-    clearInterval(bulkProgressInterval);
-    bulkProgressInterval = null;
-  }
-}
-
-// Update bulk processing progress in UI
-function updateBulkProgress(data) {
-  const titleElement = document.getElementById('upgradeTitle');
-  const progressPercent = data.totalFiles > 0 ? Math.round((data.completedFiles / data.totalFiles) * 100) : 0;
-  
-  titleElement.innerHTML = `
-    <h4>📊 Bulk Processing Progress: ${data.completedFiles}/${data.totalFiles} (${progressPercent}%)</h4>
-    <div class="progress" style="margin: 10px 0;">
-      <div class="progress-bar progress-bar-success" role="progressbar" style="width: ${progressPercent}%">
-        ${progressPercent}%
-      </div>
-    </div>
-    <small>
-      ✅ Completed: ${data.completedFiles} | 
-      🔄 Processing: ${data.processingFiles || 0} | 
-      ⏳ Queued: ${data.queuedFiles || 0} | 
-      ❌ Failed: ${data.failedFiles || 0}
-    </small>
-  `;
-
-  // Update individual file statuses if available
-  if (data.files && data.files.length > 0) {
-    updateBulkFileList(data.files);
-  }
-}
-
-// Update bulk file list in UI
-function updateBulkFileList(files) {
-  const logList = document.getElementById('logStatus');
-  
-  // Clear existing file entries but keep the bulk processing header
-  const entries = Array.from(logList.children);
-  entries.forEach(entry => {
-    if (entry.textContent.includes('File:') && 
-        !entry.textContent.includes('Bulk Processing Started')) {
-      entry.remove();
-    }
-  });
-
-  // Group files by status for better organization
-  const filesByStatus = {
-    completed: files.filter(f => f.status === 'completed'),
-    processing: files.filter(f => f.status === 'processing' || f.status === 'submitted'),
-    queued: files.filter(f => f.status === 'queued'),
-    failed: files.filter(f => f.status === 'failed')
-  };
-
-  // Show processing files first (limited to 5 for UI clarity)
-  filesByStatus.processing.slice(0, 5).forEach(file => {
-    const statusText = file.status === 'submitted' ? 'SUBMITTED TO DA' : 'PROCESSING';
-    addBulkFileStatus(file.name, statusText, 'list-group-item-info', file.workItemId);
-  });
-
-  // Show recently completed files (limited to 5)
-  filesByStatus.completed.slice(0, 5).forEach(file => {
-    addBulkFileStatus(file.name, 'COMPLETED', 'list-group-item-success', file.workItemId);
-  });
-
-  // Show failed files (all of them, as these are important)
-  filesByStatus.failed.forEach(file => {
-    const errorText = file.error ? `FAILED: ${file.error}` : 'FAILED';
-    addBulkFileStatus(file.name, errorText, 'list-group-item-danger', file.workItemId);
-  });
-
-  // Show queued files count if any
-  if (filesByStatus.queued.length > 0) {
-    addGroupListItem(
-      `${filesByStatus.queued.length} files waiting in queue`, 
-      'QUEUED', 
-      ItemType.FOLDER, 
-      'list-group-item-warning'
-    );
-  }
-
-  // Add summary if there are many files
-  const totalShown = Math.min(5, filesByStatus.processing.length) + 
-                    Math.min(5, filesByStatus.completed.length) + 
-                    filesByStatus.failed.length;
-  const totalFiles = files.length;
-  
-  if (totalShown < totalFiles) {
-    addGroupListItem(
-      `... and ${totalFiles - totalShown} more files`, 
-      'Various statuses', 
-      ItemType.FOLDER, 
-      'list-group-item-info'
-    );
-  }
-}
-
-function addBulkFileStatus(fileName, status, cssClass, workItemId) {
-  const logList = document.getElementById('logStatus');
-  
-  // Check if this file already has an entry
-  const existingEntry = Array.from(logList.children).find(entry => 
-    entry.textContent.includes(`File:${fileName}`)
-  );
-  
-  if (existingEntry) {
-    // Update existing entry
-    existingEntry.className = 'list-group-item ' + cssClass;
-    const label = existingEntry.querySelector('label');
-    if (label) {
-      label.textContent = `, status: ${status}`;
-    }
-  } else {
-    // Create new entry
-    addGroupListItem(fileName, status, ItemType.FILE, cssClass, workItemId);
-  }
-}
-
-
-// Get CSS class for file status
-function getStatusClass(status) {
-  switch (status.toLowerCase()) {
-    case 'completed': return 'list-group-item-success';
-    case 'failed': return 'list-group-item-danger';
-    case 'processing': return 'list-group-item-info';
-    case 'queued': return 'list-group-item-warning';
-    default: return 'list-group-item-default';
-  }
-}
-
-// Finish bulk processing
-function finishBulkProcessing(finalStatus) {
-  bulkProcessingActive = false;
-  currentBatchId = null;
-  
-  // Stop any progress monitoring
-  stopBulkProgressMonitoring();
-  
-  let upgradeBtnElm = document.getElementById('upgradeBtn');
-  upgradeBtnElm.disabled = false;
-  
-  const successCount = finalStatus.completedFiles || 0;
-  const failedCount = finalStatus.failedFiles || 0;
-  const totalCount = finalStatus.totalFiles || 0;
-  
-  // Show final status
-  let statusMessage;
-  let statusIcon;
-  
-  if (failedCount === 0 && successCount === totalCount) {
-    statusMessage = `Bulk Processing Completed Successfully!`;
-    statusIcon = '🎉';
-  } else if (successCount === 0) {
-    statusMessage = `Bulk Processing Failed - All files failed`;
-    statusIcon = '❌';
-  } else {
-    statusMessage = `Bulk Processing Completed with Issues`;
-    statusIcon = '⚠️';
-  }
-  
-  document.getElementById('upgradeTitle').innerHTML = `
-    <h4>${statusIcon} ${statusMessage}</h4>
-    <div style="margin-top: 10px;">
-      <strong>Final Results:</strong><br>
-      ✅ Successfully processed: ${successCount} files<br>
-      ❌ Failed: ${failedCount} files<br>
-      📁 Total: ${totalCount} files
-    </div>
-  `;
-
-  // Clear queue status
-  document.getElementById('queueStatus').innerHTML = '';
-
-  // Refresh tree nodes after a short delay
-  setTimeout(() => {
-    if(sourceNode !== null){
-      let instance = $('#sourceHubs').jstree(true);
-      instance.refresh_node(sourceNode);
-      sourceNode = null;
-    }
-    if(destinatedNode !== null ){
-      let instance = $('#destinationHubs').jstree(true);
-      instance.refresh_node(destinatedNode);
-      destinatedNode = null;
-    }
-  }, 1000);
-}
-
-// Original folder upgrade function (kept for legacy mode)
+/**
+ * Original folder upgrade function (legacy mode)
+ */
 async function upgradeFolder(sourceNode, destinationNode) {
   if (sourceNode === null || sourceNode.type !== 'folders')
     return false;
@@ -1266,14 +879,12 @@ async function upgradeFolder(sourceNode, destinationNode) {
   if (destinationNode === null || destinationNode.type !== 'folders')
     return false;
 
-  // Reset file queue for this folder
   fileQueue = [];
   
   let instance = $("#sourceHubs").jstree(true);
   instance.open_node(sourceNode, async function(e, data){
     let childrenDom = e.children;
     
-    // First, collect all files that need processing
     let filesToProcess = [];
     
     for (let i = 0; i < childrenDom.length; i++) {
@@ -1307,16 +918,13 @@ async function upgradeFolder(sourceNode, destinationNode) {
       }
     }
     
-    // Update UI with total files found
     if(filesToProcess.length > 0) {
       document.getElementById('upgradeTitle').innerHTML = 
         `<h4>Starting upgrade of ${filesToProcess.length} Revit files (Processing ${Math.min(FileLimitation, filesToProcess.length)} at a time)...</h4>`;
     }
     
-    // Process files with queue management
     for(let i = 0; i < filesToProcess.length; i++) {
       if(i < FileLimitation) {
-        // Process first batch immediately
         const { node, destinationNode } = filesToProcess[i];
         try {
           let upgradeInfo = await upgradeFileToFolder(node.id, destinationNode.id);
@@ -1329,64 +937,17 @@ async function upgradeFolder(sourceNode, destinationNode) {
           totalFilesProcessed++;
         }
       } else {
-        // Add remaining files to queue
         fileQueue.push(filesToProcess[i]);
       }
     }
     
-    // Update UI to show queue status
     if(fileQueue.length > 0) {
       console.log(`${fileQueue.length} files queued for processing`);
     }
   }, true);
 }
 
-function updateQueueStatus() {
-  const activeCount = workitemList.length;
-  const queuedCount = fileQueue.length;
-  const processedCount = totalFilesProcessed;
-  
-  let statusText = `Processing: ${activeCount} active`;
-  if(queuedCount > 0) {
-    statusText += `, ${queuedCount} queued`;
-  }
-  statusText += `, ${processedCount} completed`;
-  
-  // You can add a status element to show this
-  const statusElement = document.getElementById('queueStatus');
-  if(statusElement) {
-    statusElement.textContent = statusText;
-  }
-}
-
-// Cancel bulk processing function
-async function cancelBulkProcessing() {
-  if (!currentBatchId) return;
-  
-  try {
-    await jQuery.ajax({
-      url: `/api/aps/da4revit/v1/upgrader/bulk/${currentBatchId}`,
-      method: 'DELETE',
-      dataType: 'json'
-    });
-    
-    stopBulkProgressMonitoring();
-    bulkProcessingActive = false;
-    currentBatchId = null;
-    
-    let upgradeBtnElm = document.getElementById('upgradeBtn');
-    upgradeBtnElm.disabled = false;
-    
-    document.getElementById('upgradeTitle').innerHTML = "<h4>🛑 Bulk Processing Cancelled</h4>";
-    addGroupListItem('Bulk Processing', 'Cancelled by user', ItemType.FOLDER, 'list-group-item-warning');
-    
-  } catch (error) {
-    console.error('Error cancelling bulk processing:', error);
-    addGroupListItem('Cancel Operation', 'Failed: ' + error.message, ItemType.FOLDER, 'list-group-item-danger');
-  }
-}
-
-// Rest of the original functions remain unchanged...
+// API Functions
 function upgradeFileToFolder(sourceFile, destinateFolder){  
   let def = $.Deferred();
 
@@ -1440,7 +1001,7 @@ function upgradeFile(node) {
   return def.promise();
 }
 
-function prepareUserHubsTree( userHubs) {
+function prepareUserHubsTree(userHubs) {
   $(userHubs).jstree({
     'core': {
       'themes': { "icons": true },
@@ -1500,9 +1061,9 @@ function autodeskCustomMenuSource(autodeskNode) {
               sourceNode = autodeskNode;
               workitemList.push(upgradeInfo.workItemId);
               document.getElementById('upgradeTitle').innerHTML ="<h4>Creating versions in BIM360...</h4>";
-              addGroupListItem(autodeskNode.text, upgradeInfo.workItemStatus, ItemType.FILE, 'list-group-item-info', upgradeInfo.workItemId  );    
+              addGroupListItem(autodeskNode.text, upgradeInfo.workItemStatus, ItemType.FILE, 'list-group-item-info', upgradeInfo.workItemId);    
             }catch(err){
-              addGroupListItem(autodeskNode.text, 'Failed', ItemType.FILE, 'list-group-item-danger' );
+              addGroupListItem(autodeskNode.text, 'Failed', ItemType.FILE, 'list-group-item-danger');
             }
         },
           icon: 'glyphicon glyphicon-transfer'
@@ -1665,10 +1226,11 @@ function getWorkitemStatus( workitemId ){
   return def.promise();
 }
 
-function updateListItem( itemId, statusStr){
-  let item = document.getElementById(itemId+ LabelIdEndfix);
+function updateListItem(itemId, statusStr){
+  let item = document.getElementById(itemId + LabelIdEndfix);
   if(item !== null){
-    item.textContent = ', workitem is: '+ itemId+ ', status is:' + statusStr;
+    const shortId = extractWorkitemGuid(itemId);
+    item.textContent = ', workitem: '+ shortId + ', status: ' + statusStr;
     const statusStrLowercase = statusStr.toLowerCase();
     if(statusStrLowercase === 'success' 
     || statusStrLowercase === 'cancelled'
@@ -1683,9 +1245,13 @@ function updateListItem( itemId, statusStr){
   }
 }
 
-function addGroupListItem(itemText, statusStr, itemType, itemStyle, itemId) {
-  let li = document.createElement('li')
+function addGroupListItem(itemText, statusStr, itemType, itemStyle, itemId, elementId) {
+  let li = document.createElement('li');
   li.setAttribute('class', 'list-group-item ' + itemStyle);
+  
+  if (elementId) {
+    li.setAttribute('id', elementId);
+  }
 
   let label = document.createElement('label');
   label.setAttribute('id', itemId + LabelIdEndfix);
@@ -1693,10 +1259,14 @@ function addGroupListItem(itemText, statusStr, itemType, itemStyle, itemId) {
   switch (itemType) {
     case ItemType.FILE:
       li.textContent = 'File:' + itemText;
-      label.textContent = ', workitem is:' + itemId + ', status is:' + statusStr;
-      li.appendChild(label)
+      if (itemId) {
+        const shortId = extractWorkitemGuid(itemId);
+        label.textContent = ', workitem: ' + shortId + ', status: ' + statusStr;
+      } else {
+        label.textContent = ', status: ' + statusStr;
+      }
+      li.appendChild(label);
 
-      // Add cancel button for individual workitems (not bulk processing)
       if (itemId && itemId !== currentBatchId) {
         let spanCancel = document.createElement('span')
         spanCancel.setAttribute('class', 'btn btn-xs btn-default')
@@ -1716,21 +1286,20 @@ function addGroupListItem(itemText, statusStr, itemType, itemStyle, itemId) {
       
     case ItemType.FOLDER:
       li.textContent = 'Folder:' + itemText;
-      label.textContent = ', status is:' + statusStr;
-      li.appendChild(label)
+      label.textContent = ', status: ' + statusStr;
+      li.appendChild(label);
       
-      // Add cancel button for bulk processing
-      if (itemId === currentBatchId && bulkProcessingActive) {
-        let spanCancel = document.createElement('span')
-        spanCancel.setAttribute('class', 'btn btn-xs btn-danger')
+      if (currentBatchId && bulkProcessingActive && itemText.includes('Processing')) {
+        let spanCancel = document.createElement('span');
+        spanCancel.setAttribute('class', 'btn btn-xs btn-danger pull-right');
         spanCancel.setAttribute('id', 'bulk-cancel');
         spanCancel.onclick = async (e) => {
           if (confirm('Are you sure you want to cancel bulk processing?')) {
             await cancelBulkProcessing();
           }
         };
-        spanCancel.textContent = 'Cancel Bulk';
-        li.appendChild(spanCancel)
+        spanCancel.textContent = 'Cancel All';
+        li.appendChild(spanCancel);
       }
       break;
   }
@@ -1745,4 +1314,728 @@ function showUser() {
       $('#userInfo').html(img + profile.name);
     }
   });
+}
+
+/**
+ * Initialize project upgrade UI components
+ */
+function initializeProjectUpgrade() {
+  const upgradeButton = `
+    <button class="btn btn-primary" id="projectUpgradeBtn" style="margin-left: 10px;">
+      <span class="glyphicon glyphicon-transfer"></span> Upgrade Entire Project
+    </button>
+  `;
+  
+  $('#upgradeBtn').after(upgradeButton);
+  
+  const modalHtml = `
+    <div class="modal fade" id="projectUpgradeModal" tabindex="-1" role="dialog">
+      <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+          <div class="modal-header">
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+            <h4 class="modal-title">Project-to-Project Upgrade</h4>
+          </div>
+          <div class="modal-body">
+            <div class="alert alert-info">
+              <strong>How it works:</strong> 
+              <ul style="margin-bottom: 0;">
+                <li><strong>Same Project (In-Place):</strong> Creates new versions of all Revit files within the current project</li>
+                <li><strong>Different Projects:</strong> Copies files to destination project and upgrades them</li>
+              </ul>
+            </div>
+            
+            <div class="row">
+              <div class="col-md-6">
+                <div class="form-group">
+                  <label for="sourceProject">Source Project:</label>
+                  <select class="form-control" id="sourceProject">
+                    <option value="">Loading projects...</option>
+                  </select>
+                  <small class="text-muted">Select the project containing files to upgrade</small>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-group">
+                  <label for="destinationProject">Destination Project:</label>
+                  <select class="form-control" id="destinationProject">
+                    <option value="">Loading projects...</option>
+                  </select>
+                  <small class="text-muted">Select same project for in-place upgrade or different project to copy</small>
+                </div>
+              </div>
+            </div>
+            
+            <div id="upgradeMode"></div>
+            
+            <div class="row">
+              <div class="col-md-6">
+                <div class="form-group">
+                  <label>Target Revit Version:</label>
+                  <div class="radio">
+                    <label>
+                      <input type="radio" name="projectTargetVersion" value="2023" checked>
+                      Revit 2023
+                    </label>
+                  </div>
+                  <div class="radio">
+                    <label>
+                      <input type="radio" name="projectTargetVersion" value="2024">
+                      Revit 2024
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="form-group">
+                  <label>Options:</label>
+                  <div class="checkbox">
+                    <label>
+                      <input type="checkbox" id="maintainStructure" checked>
+                      Maintain folder structure
+                    </label>
+                  </div>
+                  <div class="checkbox">
+                    <label>
+                      <input type="checkbox" id="skipExisting">
+                      Skip existing files
+                    </label>
+                  </div>
+                  <div class="checkbox">
+                    <label>
+                      <input type="checkbox" id="includeWorkshared">
+                      Include workshared files (not recommended)
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="row">
+              <div class="col-md-12">
+                <div id="projectAnalysisResult" style="display: none;">
+                  <h5>Analysis Result:</h5>
+                  <div id="analysisContent"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-info" id="analyzeProjectBtn">
+              <span class="glyphicon glyphicon-search"></span> Analyze Source
+            </button>
+            <button type="button" class="btn btn-primary" id="startProjectUpgradeBtn" disabled>
+              <span class="glyphicon glyphicon-play"></span> Start Upgrade
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Enhanced Progress Modal -->
+    <div class="modal fade" id="projectUpgradeProgressModal" tabindex="-1" role="dialog" data-backdrop="static">
+      <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h4 class="modal-title">Project Upgrade Progress</h4>
+          </div>
+          <div class="modal-body">
+            <div id="upgradeModeSummary"></div>
+            
+            <div id="projectAnalysisPanel"></div>
+            
+            <div class="progress">
+              <div id="projectUpgradeProgressBar" class="progress-bar progress-bar-striped active" 
+                   role="progressbar" style="width: 0%">
+                <span class="sr-only">0% Complete</span>
+              </div>
+            </div>
+            
+            <div id="projectUpgradeStats" style="margin-top: 20px;">
+              <div class="row">
+                <div class="col-md-3 text-center">
+                  <h3 id="totalFilesCount">0</h3>
+                  <p>Total Files</p>
+                </div>
+                <div class="col-md-3 text-center">
+                  <h3 id="completedFilesCount" class="text-success">0</h3>
+                  <p>Completed</p>
+                </div>
+                <div class="col-md-3 text-center">
+                  <h3 id="processingFilesCount" class="text-info">0</h3>
+                  <p>Processing</p>
+                </div>
+                <div class="col-md-3 text-center">
+                  <h3 id="failedFilesCount" class="text-danger">0</h3>
+                  <p>Failed</p>
+                </div>
+              </div>
+            </div>
+            
+            <div id="projectUpgradeLog" style="max-height: 300px; overflow-y: auto; margin-top: 20px;">
+              <h5>Processing Log:</h5>
+              <div id="logContent"></div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-warning" id="cancelProjectUpgradeBtn">
+              <span class="glyphicon glyphicon-stop"></span> Cancel
+            </button>
+            <button type="button" class="btn btn-success" id="closeProgressBtn" style="display: none;">
+              <span class="glyphicon glyphicon-ok"></span> Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  $('body').append(modalHtml);
+  
+  setupProjectUpgradeHandlers();
+}
+
+/**
+ * Setup project upgrade event handlers
+ */
+function setupProjectUpgradeHandlers() {
+  $('#projectUpgradeBtn').click(function() {
+    $('#projectUpgradeModal').modal('show');
+    loadAvailableProjects();
+  });
+  
+  $('#analyzeProjectBtn').click(analyzeSourceProject);
+  
+  $('#startProjectUpgradeBtn').click(startProjectUpgrade);
+  
+  $('#cancelProjectUpgradeBtn').click(cancelProjectUpgrade);
+  
+  // FIXED: Add handler for close button
+  $('#closeProgressBtn').click(function() {
+    $('#projectUpgradeProgressModal').modal('hide');
+    
+    if (window.projectUpgradeInterval) {
+      clearInterval(window.projectUpgradeInterval);
+      window.projectUpgradeInterval = null;
+    }
+    
+    resetProjectUpgradeUI();
+  });
+  
+  $('#sourceProject, #destinationProject').change(validateProjectSelection);
+  
+  $('#projectUpgradeProgressModal').on('hidden.bs.modal', function() {
+    if (window.projectUpgradeInterval) {
+      clearInterval(window.projectUpgradeInterval);
+      window.projectUpgradeInterval = null;
+    }
+  });
+}
+
+/**
+ * Reset project upgrade UI
+ */
+function resetProjectUpgradeUI() {
+  $('#projectUpgradeProgressBar').css('width', '0%').text('0%');
+  $('#totalFilesCount').text('0');
+  $('#completedFilesCount').text('0');
+  $('#processingFilesCount').text('0');
+  $('#failedFilesCount').text('0');
+  $('#logContent').empty();
+  $('#projectAnalysisPanel').empty();
+  $('#cancelProjectUpgradeBtn').show();
+  $('#closeProgressBtn').hide();
+  window.currentProjectUpgradeBatchId = null;
+}
+
+/**
+ * Load available projects
+ */
+async function loadAvailableProjects() {
+  try {
+    const response = await $.ajax({
+      url: '/api/aps/da4revit/v1/upgrader/projects',
+      method: 'GET'
+    });
+    
+    const projectOptions = '<option value="">-- Select a project --</option>' +
+      response.projects.map(project => {
+        const fullProjectId = project.id.startsWith('b.') ? project.id : `b.${project.id}`;
+        
+        return `<option value="${fullProjectId}" data-hub="${project.hubId}">
+          ${project.name} (${project.hubName})
+        </option>`;
+      }).join('');
+      
+    $('#sourceProject, #destinationProject').html(projectOptions);
+    
+  } catch (error) {
+    console.error('Failed to load projects:', error);
+  }
+}
+
+/**
+ * Validate project selection
+ */
+function validateProjectSelection() {
+  const sourceId = $('#sourceProject').val();
+  const destId = $('#destinationProject').val();
+  
+  if (sourceId && destId) {
+    if (sourceId === destId) {
+      $('#upgradeMode').html(`
+        <div class="alert alert-info" style="margin-top: 10px;">
+          <strong>In-Place Upgrade Mode:</strong> Files will be upgraded within the same project. 
+          New versions will be created for each file while preserving the original folder structure.
+        </div>
+      `);
+      
+      $('#maintainStructure').prop('checked', true).prop('disabled', true);
+      $('#maintainStructure').closest('.checkbox').addClass('text-muted');
+      
+      $('#startProjectUpgradeBtn').html(
+        '<span class="glyphicon glyphicon-refresh"></span> Upgrade In Place'
+      );
+      
+    } else {
+      $('#upgradeMode').html(`
+        <div class="alert alert-success" style="margin-top: 10px;">
+          <strong>Cross-Project Upgrade Mode:</strong> Files will be copied from source to destination 
+          project and upgraded. Original files remain unchanged.
+        </div>
+      `);
+      
+      $('#maintainStructure').prop('disabled', false);
+      $('#maintainStructure').closest('.checkbox').removeClass('text-muted');
+      
+      $('#startProjectUpgradeBtn').html(
+        '<span class="glyphicon glyphicon-transfer"></span> Copy & Upgrade'
+      );
+    }
+    
+    $('#startProjectUpgradeBtn').prop('disabled', false);
+    
+  } else {
+    $('#upgradeMode').empty();
+    $('#startProjectUpgradeBtn').prop('disabled', true);
+  }
+}
+
+/**
+ * Analyze source project
+ */
+async function analyzeSourceProject() {
+  const sourceId = $('#sourceProject').val();
+  const destId = $('#destinationProject').val();
+  const targetVersion = $('input[name="projectTargetVersion"]:checked').val();
+  
+  if (!sourceId) {
+    showAlert('Please select a source project first.', 'warning');
+    return;
+  }
+  
+  const isInPlaceUpgrade = sourceId === destId;
+  
+  $('#analyzeProjectBtn').prop('disabled', true).html(
+    '<span class="glyphicon glyphicon-refresh spinning"></span> Analyzing...'
+  );
+  
+  try {
+    // Make actual API call to analyze the project
+    const response = await $.ajax({
+      url: '/api/aps/da4revit/v1/upgrader/project/analyze',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({
+        sourceProjectId: sourceId,
+        destinationProjectId: destId || sourceId,
+        targetVersion: targetVersion,
+        includeWorkshared: $('#includeWorkshared').is(':checked')
+      })
+    });
+    
+    // Use real data from response
+    const analysisHtml = `
+      <div class="well">
+        <strong>Upgrade Mode:</strong> ${isInPlaceUpgrade ? 
+          'In-Place (creating new versions)' : 
+          'Cross-Project (copying to destination)'}
+        <br><br>
+        
+        <div class="row">
+          <div class="col-md-6">
+            <strong>Source project contains:</strong>
+            <ul>
+              <li>${response.totalFolders || 0} folders</li>
+              <li>${response.totalFiles || 0} Revit files total
+                <ul>
+                  <li>${response.filesByType?.rvt || 0} RVT files</li>
+                  <li>${response.filesByType?.rfa || 0} RFA files</li>
+                  <li>${response.filesByType?.rte || 0} RTE files</li>
+                </ul>
+              </li>
+            </ul>
+          </div>
+          <div class="col-md-6">
+            <strong>Upgrade Analysis:</strong>
+            <ul>
+              <li class="text-success">${response.needsUpgrade || 0} files need upgrade to Revit ${targetVersion}</li>
+              <li class="text-muted">${response.alreadyUpgraded || 0} files already at Revit ${targetVersion}</li>
+              <li class="text-warning">${response.worksharedFiles || 0} workshared files (${$('#includeWorkshared').is(':checked') ? 'will be included' : 'will be skipped'})</li>
+            </ul>
+            ${response.needsUpgrade > 0 ? `
+            <div class="alert alert-success" style="margin-top: 10px;">
+              <strong>Optimization:</strong> Only ${response.needsUpgrade} files will be processed, 
+              saving approximately ${Math.round((response.alreadyUpgraded || 0) * 0.5)} minutes.
+            </div>
+            ` : `
+            <div class="alert alert-info" style="margin-top: 10px;">
+              <strong>All files are up to date!</strong> No upgrade needed.
+            </div>
+            `}
+          </div>
+        </div>
+        
+        <strong>What will happen:</strong>
+        <ul>
+          ${isInPlaceUpgrade ? `
+            <li>Each file will get a new version in its current location</li>
+            <li>Original versions will be preserved in version history</li>
+            <li>No files will be moved or copied</li>
+            <li>All metadata and permissions will be retained</li>
+          ` : `
+            <li>Files will be copied to the destination project</li>
+            <li>Folder structure will be ${$('#maintainStructure').is(':checked') ? 'recreated' : 'flattened'}</li>
+            <li>Original files will remain unchanged</li>
+            <li>New items will be created in destination</li>
+          `}
+        </ul>
+        <strong>Estimated time:</strong> ${response.estimatedTime || `~${Math.ceil((response.needsUpgrade || 0) * 0.5)} minutes`}
+      </div>
+    `;
+    
+    $('#analysisContent').html(analysisHtml);
+    $('#projectAnalysisResult').show();
+    
+  } catch (error) {
+    console.log('Analysis endpoint not available, using estimation...');
+    
+    // If endpoint doesn't exist, provide a reasonable estimation
+    const analysisHtml = `
+      <div class="well">
+        <div class="alert alert-info">
+          <strong>Note:</strong> This is an estimation. Actual file counts will be determined during processing.
+        </div>
+        <strong>Upgrade Mode:</strong> ${isInPlaceUpgrade ? 
+          'In-Place (creating new versions)' : 
+          'Cross-Project (copying to destination)'}
+        <br><br>
+        
+        <strong>What will happen:</strong>
+        <ul>
+          ${isInPlaceUpgrade ? `
+            <li>All Revit files (RVT, RFA, RTE) in the project will be analyzed</li>
+            <li>Only files needing upgrade to Revit ${targetVersion} will be processed</li>
+            <li>New versions will be created in their current locations</li>
+            <li>Original versions will be preserved in version history</li>
+          ` : `
+            <li>All Revit files will be copied to the destination project</li>
+            <li>Only files needing upgrade will be processed</li>
+            <li>Folder structure will be ${$('#maintainStructure').is(':checked') ? 'maintained' : 'flattened'}</li>
+            <li>Original files will remain unchanged</li>
+          `}
+        </ul>
+        
+        <div class="alert alert-success">
+          <strong>Performance Optimization:</strong><br>
+          • Files already at Revit ${targetVersion} will be automatically skipped<br>
+          • Workshared files will be ${$('#includeWorkshared').is(':checked') ? 'included' : 'excluded'}<br>
+          • Version detection will minimize unnecessary processing
+        </div>
+      </div>
+    `;
+    
+    $('#analysisContent').html(analysisHtml);
+    $('#projectAnalysisResult').show();
+    
+  } finally {
+    $('#analyzeProjectBtn').prop('disabled', false).html(
+      '<span class="glyphicon glyphicon-search"></span> Analyze Source'
+    );
+  }
+}
+
+/**
+ * Start project upgrade
+ */
+async function startProjectUpgrade() {
+  const sourceProjectId = $('#sourceProject').val();
+  const destinationProjectId = $('#destinationProject').val();
+  const targetVersion = $('input[name="projectTargetVersion"]:checked').val();
+  
+  if (!sourceProjectId || !destinationProjectId) {
+    showAlert('Please select both source and destination projects.', 'warning');
+    return;
+  }
+  
+  const requestData = {
+    sourceProjectId,
+    destinationProjectId,
+    targetVersion,
+    maintainStructure: $('#maintainStructure').is(':checked'),
+    skipExisting: $('#skipExisting').is(':checked'),
+    includeWorkshared: $('#includeWorkshared').is(':checked')
+  };
+  
+  try {
+    $('#startProjectUpgradeBtn').prop('disabled', true).html(
+      '<span class="glyphicon glyphicon-refresh spinning"></span> Starting...'
+    );
+    
+    const response = await $.ajax({
+      url: '/api/aps/da4revit/v1/upgrader/project',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify(requestData)
+    });
+    
+    if (response.success) {
+      window.currentProjectUpgradeBatchId = response.batchId;
+      
+      $('#projectUpgradeModal').modal('hide');
+      $('#projectUpgradeProgressModal').modal('show');
+      
+      $('#totalFilesCount').text(response.summary.totalFiles);
+      
+      // Show analysis panel in progress modal
+      if (response.stats) {
+        const analysisPanel = createAnalysisPanel(
+          response.stats, 
+          targetVersion, 
+          response.performance?.analysisTime || '0.0'
+        );
+        $('#projectAnalysisPanel').html(analysisPanel);
+      }
+      
+      addLogEntry(`Started ${response.upgradeMode} upgrade of ${response.summary.totalFiles} files to Revit ${targetVersion}`);
+      addLogEntry(`Batch ID: ${response.batchId}`);
+      
+      if (response.breakdown) {
+        addLogEntry(`Skipped ${response.breakdown.alreadyUpgraded} files already at target version`, 'info');
+        if (response.breakdown.worksharedSkipped > 0) {
+          addLogEntry(`Skipped ${response.breakdown.worksharedSkipped} workshared files`, 'warning');
+        }
+      }
+      
+      startProgressPolling(response.batchId);
+    }
+    
+  } catch (error) {
+    console.error('Failed to start project upgrade:', error);
+    showAlert('Failed to start project upgrade. ' + (error.responseJSON?.error || ''), 'danger');
+  } finally {
+    $('#startProjectUpgradeBtn').prop('disabled', false).html(
+      '<span class="glyphicon glyphicon-play"></span> Start Upgrade'
+    );
+  }
+}
+
+/**
+ * Poll for progress
+ */
+function startProgressPolling(batchId) {
+  if (window.projectUpgradeInterval) {
+    clearInterval(window.projectUpgradeInterval);
+  }
+  
+  // Poll every 2 seconds
+  window.projectUpgradeInterval = setInterval(async () => {
+    try {
+      const status = await $.ajax({
+        url: `/api/aps/da4revit/v1/upgrader/bulk/${batchId}/status`,
+        method: 'GET'
+      });
+      
+      updateProgressDisplay(status);
+      
+      // Check if complete
+      if (status.status === 'completed' || status.percentComplete === 100) {
+        clearInterval(window.projectUpgradeInterval);
+        window.projectUpgradeInterval = null;
+        onUpgradeComplete(status);
+      }
+      
+    } catch (error) {
+      console.error('Failed to get upgrade status:', error);
+    }
+  }, 2000);
+}
+
+/**
+ * Update progress display
+ */
+function updateProgressDisplay(status) {
+  // Calculate percent - handle both percentComplete and manual calculation
+  const percent = status.percentComplete || (status.totalFiles > 0 ? Math.round(((status.completedFiles || 0) / status.totalFiles) * 100) : 0);
+  
+  // Update progress bar with animation
+  $('#projectUpgradeProgressBar')
+    .css('width', percent + '%')
+    .attr('aria-valuenow', percent)
+    .text(percent + '%');
+  
+  // Update counters
+  $('#completedFilesCount').text(status.completedFiles || 0);
+  $('#processingFilesCount').text(status.processingFiles || 0);
+  $('#failedFilesCount').text(status.failedFiles || 0);
+  
+  // Update mode summary if not already set
+  if (status.projectInfo && $('#upgradeModeSummary').is(':empty')) {
+    const isInPlace = status.projectInfo.sourceProject === status.projectInfo.destinationProject;
+    const modeSummary = `
+      <div class="well well-sm" style="margin-bottom: 10px;">
+        <strong>Mode:</strong> ${isInPlace ? 'In-Place Upgrade' : 'Cross-Project Upgrade'}<br>
+        <strong>Target Version:</strong> Revit ${status.targetVersion || '2023'}
+      </div>
+    `;
+    $('#upgradeModeSummary').html(modeSummary);
+  }
+  
+  // Initialize processed files tracking
+  if (!window.processedFiles) {
+    window.processedFiles = new Set();
+  }
+  
+  // Add log entries for status changes
+  if (status.files) {
+    status.files.forEach(file => {
+      const fileKey = `${file.name}_${file.status}`;
+      
+      if (!window.processedFiles.has(fileKey)) {
+        if (file.status === 'completed') {
+          const action = status.upgradeMode === 'in-place' ? 'version created' : 'copied & upgraded';
+          addLogEntry(`✓ Completed: ${file.name} (${action})`, 'success');
+          window.processedFiles.add(fileKey);
+        } else if (file.status === 'failed') {
+          addLogEntry(`✗ Failed: ${file.name} - ${file.error || 'Unknown error'}`, 'danger');
+          window.processedFiles.add(fileKey);
+        }
+      }
+    });
+  }
+  
+  // Update time remaining
+  if (status.estimatedTimeRemaining && percent < 100) {
+    updateTimeRemaining(status.estimatedTimeRemaining);
+  }
+}
+
+/**
+ * Update time remaining
+ */
+function updateTimeRemaining(timeRemaining) {
+  const existingTimeEntry = $('#logContent').find('.time-remaining');
+  if (existingTimeEntry.length > 0) {
+    existingTimeEntry.text(`[${new Date().toLocaleTimeString()}] Estimated time remaining: ${timeRemaining}`);
+  } else {
+    addLogEntry(`Estimated time remaining: ${timeRemaining}`, 'info', false, 'time-remaining');
+  }
+}
+
+/**
+ * Handle upgrade completion
+ */
+function onUpgradeComplete(status) {
+  window.processedFiles = null;
+  
+  $('#projectUpgradeProgressBar')
+    .removeClass('active')
+    .addClass(status.failedFiles > 0 ? 'progress-bar-warning' : 'progress-bar-success');
+  
+  $('#cancelProjectUpgradeBtn').hide();
+  $('#closeProgressBtn').show();
+  
+  let message = `Upgrade complete! Successfully processed ${status.completedFiles} files.`;
+  if (status.failedFiles > 0) {
+    message += ` ${status.failedFiles} files failed.`;
+  }
+  
+  addLogEntry(message, status.failedFiles > 0 ? 'warning' : 'success');
+  
+  showAlert(message, status.failedFiles > 0 ? 'warning' : 'success', 10000);
+}
+
+/**
+ * Cancel project upgrade
+ */
+async function cancelProjectUpgrade() {
+  if (!window.currentProjectUpgradeBatchId) return;
+  
+  if (!confirm('Are you sure you want to cancel the upgrade process?')) {
+    return;
+  }
+  
+  try {
+    await $.ajax({
+      url: `/api/aps/da4revit/v1/upgrader/bulk/${window.currentProjectUpgradeBatchId}`,
+      method: 'DELETE'
+    });
+    
+    clearInterval(window.projectUpgradeInterval);
+    addLogEntry('Upgrade cancelled by user', 'warning');
+    $('#cancelProjectUpgradeBtn').hide();
+    $('#closeProgressBtn').show();
+    
+  } catch (error) {
+    console.error('Failed to cancel upgrade:', error);
+    showAlert('Failed to cancel upgrade process.', 'danger');
+  }
+}
+
+/**
+ * Add log entry
+ */
+function addLogEntry(message, type = 'info', replace = false, additionalClass = '') {
+  const timestamp = new Date().toLocaleTimeString();
+  const typeClass = {
+    'info': 'text-info',
+    'success': 'text-success',
+    'warning': 'text-warning',
+    'danger': 'text-danger'
+  }[type] || '';
+  
+  const classes = `${typeClass} ${additionalClass}`.trim();
+  const entry = `<div class="${classes}">[${timestamp}] ${message}</div>`;
+  
+  if (replace && $('#logContent').children().last().hasClass(typeClass)) {
+    $('#logContent').children().last().replaceWith(entry);
+  } else {
+    $('#logContent').append(entry);
+  }
+  
+  $('#projectUpgradeLog').scrollTop($('#projectUpgradeLog')[0].scrollHeight);
+}
+
+/**
+ * Show alert
+ */
+function showAlert(message, type = 'info', duration = 5000) {
+  const alertId = 'alert-' + Date.now();
+  const alertHtml = `
+    <div id="${alertId}" class="alert alert-${type} alert-dismissible fade in" role="alert" style="position: fixed; top: 70px; right: 20px; z-index: 9999; max-width: 400px;">
+      <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+        <span aria-hidden="true">&times;</span>
+      </button>
+      ${message}
+    </div>
+  `;
+  
+  $('body').append(alertHtml);
+  
+  setTimeout(() => {
+    $(`#${alertId}`).fadeOut(() => $(`#${alertId}`).remove());
+  }, duration);
 }
