@@ -31,8 +31,6 @@ const {
 const express = require('express');
 let router = express.Router();
 
-
-
 ///////////////////////////////////////////////////////////////////////
 /// Middleware for obtaining a token for each request.
 ///////////////////////////////////////////////////////////////////////
@@ -46,15 +44,16 @@ router.use(async (req, res, next) => {
     }
 });
 
-
-
 router.get('/datamanagement/v1', async (req, res) => {
     // The id querystring parameter contains what was selected on the UI tree, make sure it's valid
     const href = decodeURIComponent(req.query.id);
+    console.log('Processing href:', href);
+    
     if (href === '') {
         res.status(500).end();
         return;
     }
+    
     if (href === '#') {
         // If href is '#', it's the root tree node
         getHubs(req.oauth_client, req.oauth_token, res);
@@ -63,24 +62,33 @@ router.get('/datamanagement/v1', async (req, res) => {
         const params = href.split('/');
         const resourceName = params[params.length - 2];
         const resourceId = params[params.length - 1];
+        
+        console.log('Resource type:', resourceName, 'Resource ID:', resourceId);
+        
         switch (resourceName) {
             case 'hubs':
                 getProjects(resourceId, req.oauth_client, req.oauth_token, res);
                 break;
+                
             case 'projects':
                 // For a project, first we need the top/root folder
                 const hubId = params[params.length - 3];
+                console.log('Getting folders for project:', resourceId, 'in hub:', hubId);
                 getFolders(hubId, resourceId/*project_id*/, req.oauth_client, req.oauth_token, res);
                 break;
+                
             case 'folders':
                 {
                     const projectId = params[params.length - 3];
+                    console.log('Getting contents of folder:', resourceId, 'in project:', projectId);
                     getFolderContents(projectId, resourceId/*folder_id*/, req.oauth_client, req.oauth_token, res);
                     break;
                 }
+                
             case 'items':
                 {
                     const projectId = params[params.length - 3];
+                    console.log('Getting versions for item:', resourceId, 'in project:', projectId);
                     getVersions(projectId, resourceId/*item_id*/, req.oauth_client, req.oauth_token, res);
                     break;
                 }
