@@ -512,26 +512,17 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
 
     console.log(`Creating workitem for Revit ${targetVersion} with activity: ${activityId}`);
     if (shouldDetach) {
-        console.log(`   Workshared file will be opened as DETACHED`);
+        console.log(`   Workshared file - plugin will auto-detect and detach`);
     }
 
-    // For Revit 2025 with workshared files, we need to pass the detach flag
-    // This is done via the pathInZip parameter which can include options
-    // Design Automation for Revit supports opening files as detached via the input argument
+    // Design Automation for Revit - the plugin handles workshared file detection
+    // and detachment automatically using Revit's BasicFileInfo.IsWorkshared API
     const inputArgs = {
         url: inputUrl,
         Headers: {
             Authorization: 'Bearer ' + access_token
         }
     };
-
-    // Add detach option for workshared files (Revit 2025 only)
-    if (shouldDetach && targetVersion === '2025') {
-        // The 'localName' with detach option tells DA to open the file as detached
-        inputArgs.localName = 'input.rvt';
-        inputArgs.optional = false;
-        // Pass detach hint through pathInZip (if supported) or rely on plugin detection
-    }
 
     let body = null;
     switch (fileExtension) {
@@ -553,10 +544,6 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
                     }
                 }
             };
-            // Only add detachFromCentral parameter if needed and activity supports it
-            if (shouldDetach) {
-                body.arguments.detachFromCentral = { value: true };
-            }
             break;
         case 'rfa':
             body = {
