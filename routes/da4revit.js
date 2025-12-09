@@ -617,19 +617,18 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
         
         // Process each file with version detection
         console.log('🔍 Analyzing files for upgrade necessity...');
-        
+
         for (const item of folderData.upgradeableItems) {
             stats.totalFiles++;
             const fileName = item.attributes.displayName || item.attributes.name;
-            
-            // Skip workshared files (this check is already in your code)
-            if (isWorksharingFile(item)) {
-                stats.worksharedSkipped++;
-                skippedFiles.workshared.push(fileName);
-                console.log(`⏭️  Skipping workshared file: ${fileName}`);
-                continue;
+
+            // Check if workshared - will be processed with detach option
+            const isWorkshared = isWorksharingFile(item);
+            if (isWorkshared) {
+                stats.worksharedSkipped++; // Count for reporting, but don't skip
+                console.log(`🔗 Workshared file detected (will detach): ${fileName}`);
             }
-            
+
             try {
                 // Here's the key addition - check if file needs upgrade
                 const needsUpgrade = await versionDetector.needsUpgrade(
@@ -640,7 +639,7 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     req.oauth_client,
                     req.oauth_token
                 );
-                
+
                 if (!needsUpgrade) {
                     // File is already at or above target version
                     stats.alreadyUpgraded++;
@@ -648,7 +647,7 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     console.log(`✅ Already at target version: ${fileName}`);
                     continue;
                 }
-                
+
                 // File needs upgrade - add to processing queue
                 stats.needsUpgrade++;
                 filesToUpgrade.push({
@@ -656,9 +655,14 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     fileItemName: fileName,
                     projectId: projectId,
                     itemId: item.id,
-                    extensionType: item.attributes.extension?.type || 'unknown'
+                    extensionType: item.attributes.extension?.type || 'unknown',
+                    // Add required properties for submitToDesignAutomation
+                    isInPlaceUpgrade: true,
+                    sourceProjectId: projectId,
+                    destinationProjectId: projectId,
+                    shouldDetach: isWorkshared  // Detach workshared files during upgrade
                 });
-                
+
             } catch (error) {
                 console.error(`Error checking version for ${fileName}:`, error);
                 stats.checkErrors++;
