@@ -631,13 +631,15 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
 
             try {
                 // Here's the key addition - check if file needs upgrade
+                // Pass allowWorkshared=true to process workshared files with detach
                 const needsUpgrade = await versionDetector.needsUpgrade(
                     projectId,
                     item.id,
                     fileName,
                     targetVersion,
                     req.oauth_client,
-                    req.oauth_token
+                    req.oauth_token,
+                    true  // allowWorkshared - process workshared files with detach
                 );
 
                 if (!needsUpgrade) {

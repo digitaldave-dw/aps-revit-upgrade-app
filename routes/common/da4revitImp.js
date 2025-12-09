@@ -252,18 +252,21 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
 
             if (response.statusCode >= 400) {
                 console.log('Workitem submission failed:', response.statusCode, response.statusMessage);
-                
+                console.log('Error response body:', JSON.stringify(resp, null, 2));
+
                 // Handle specific DA API errors
                 if (response.statusCode === 429) {
                     reject(new Error('Rate limit exceeded. Please wait before submitting more workitems.'));
                 } else if (response.statusCode === 400 && resp.Error && resp.Error.includes('quota')) {
                     reject(new Error('Workitem quota exceeded. Please wait for current jobs to complete.'));
                 } else {
-                    reject({
-                        statusCode: response.statusCode,
-                        statusMessage: response.statusMessage,
-                        details: resp
-                    });
+                    // Create a proper Error object with details
+                    const errorMessage = resp.message || resp.Error || resp.errorMessage ||
+                        `DA API error: ${response.statusCode} ${response.statusMessage}`;
+                    const error = new Error(errorMessage);
+                    error.statusCode = response.statusCode;
+                    error.details = resp;
+                    reject(error);
                 }
                 return;
             }
@@ -544,14 +547,16 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
                             Authorization: 'Bearer ' + access_token
                         },
                     },
-                    // Pass detach flag to the plugin via a parameter
-                    detachFromCentral: shouldDetach,
                     onComplete: {
                         verb: "post",
                         url: designAutomation.webhook_url
                     }
                 }
             };
+            // Only add detachFromCentral parameter if needed and activity supports it
+            if (shouldDetach) {
+                body.arguments.detachFromCentral = { value: true };
+            }
             break;
         case 'rfa':
             body = {
