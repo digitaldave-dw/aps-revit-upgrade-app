@@ -13,7 +13,6 @@ namespace ADNPlugin.Revit.FileUpgrader
     [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
     public class FileUpgradeApp : IExternalDBApplication
     {
-        // Store reference to our failure processor so we can unregister it later
         private static FileUpgradeFailureProcessor _failureProcessor;
 
         public ExternalDBApplicationResult OnStartup(ControlledApplication application)
@@ -23,15 +22,11 @@ namespace ADNPlugin.Revit.FileUpgrader
 
             try
             {
-                // CRITICAL: Register the failure processor BEFORE any documents are opened
-                // This is the key difference - we need this registered before DA opens the document
                 _failureProcessor = new FileUpgradeFailureProcessor();
 
-                // Use the static method on Application class - this is the correct approach
                 Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(_failureProcessor);
                 LogWithTimestamp("Global failure processor registered successfully");
 
-                // Subscribe to DesignAutomationReadyEvent
                 DesignAutomationBridge.DesignAutomationReadyEvent += HandleDesignAutomationReadyEvent;
                 LogWithTimestamp("Subscribed to DesignAutomationReadyEvent");
 
@@ -50,12 +45,10 @@ namespace ADNPlugin.Revit.FileUpgrader
 
             try
             {
-                // Get the Revit version for logging
                 Application rvtApp = e.DesignAutomationData.RevitApp;
                 string versionInfo = $"Revit Version: {rvtApp.VersionNumber} Build: {rvtApp.VersionBuild}";
                 LogWithTimestamp(versionInfo);
 
-                // Process the document (it's already open at this point)
                 e.Succeeded = ProcessDocument(e.DesignAutomationData);
 
                 if (e.Succeeded)
@@ -87,14 +80,12 @@ namespace ADNPlugin.Revit.FileUpgrader
                     return false;
                 }
 
-                // Log document information
                 LogWithTimestamp($"Document Title: {doc.Title}");
                 LogWithTimestamp($"Document Path: {doc.PathName}");
                 LogWithTimestamp($"Is Modified: {doc.IsModified}");
                 LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
                 LogWithTimestamp($"Is Detached: {doc.IsDetached}");
 
-                // Check if document has been successfully opened without critical errors
                 if (_failureProcessor.HasCriticalErrors)
                 {
                     LogError("Document was opened with critical errors that could not be resolved");
@@ -104,7 +95,6 @@ namespace ADNPlugin.Revit.FileUpgrader
                     LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
                 }
 
-                // Save the upgraded file
                 string outputPath = "revitupgrade.rvt";
                 LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
 
@@ -112,10 +102,9 @@ namespace ADNPlugin.Revit.FileUpgrader
 
                 SaveAsOptions saveOptions = new SaveAsOptions();
                 saveOptions.OverwriteExistingFile = true;
-                saveOptions.Compact = false; // Don't compact to save time
-                saveOptions.MaximumBackups = 1; // Minimize backups for DA
+                saveOptions.Compact = false; 
+                saveOptions.MaximumBackups = 1; 
 
-                // Configure worksharing if needed
                 if (doc.IsWorkshared)
                 {
                     LogWithTimestamp("Document is workshared - configuring worksharing save options");
@@ -131,7 +120,6 @@ namespace ADNPlugin.Revit.FileUpgrader
                 var saveTime = (DateTime.Now - saveStart).TotalSeconds;
                 LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
 
-                // Log final statistics
                 LogWithTimestamp("=== UPGRADE STATISTICS ===");
                 LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
                 LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
@@ -156,10 +144,8 @@ namespace ADNPlugin.Revit.FileUpgrader
 
             try
             {
-                // Unregister the failure processor to clean up
                 if (_failureProcessor != null)
                 {
-                    // Use the static method to unregister by passing null
                     Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(null);
                     LogWithTimestamp("Failure processor unregistered");
                 }
@@ -172,7 +158,6 @@ namespace ADNPlugin.Revit.FileUpgrader
             return ExternalDBApplicationResult.Succeeded;
         }
 
-        // Logging helper methods
         private static void LogWithTimestamp(string message)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
@@ -196,7 +181,6 @@ namespace ADNPlugin.Revit.FileUpgrader
     /// </summary>
     public class FileUpgradeFailureProcessor : IFailuresProcessor
     {
-        // Statistics for logging
         public int TotalFailuresProcessed { get; private set; } = 0;
         public int WarningsDeleted { get; private set; } = 0;
         public int ErrorsResolved { get; private set; } = 0;
@@ -205,7 +189,6 @@ namespace ADNPlugin.Revit.FileUpgrader
         public int NetworkErrorsFixed { get; private set; } = 0;
         public bool HasCriticalErrors { get; private set; } = false;
 
-        // Known failure IDs that we handle specifically
         private readonly HashSet<Guid> _knownFailureGuids = new HashSet<Guid>
         {
             new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"), // Dimension references not parallel
@@ -225,7 +208,6 @@ namespace ADNPlugin.Revit.FileUpgrader
             TotalFailuresProcessed += failures.Count;
             LogWithTimestamp($"Processing {failures.Count} failures");
 
-            // First pass: Delete all warnings
             var warnings = failures.Where(f => f.GetSeverity() == FailureSeverity.Warning).ToList();
             foreach (var warning in warnings)
             {
@@ -241,14 +223,12 @@ namespace ADNPlugin.Revit.FileUpgrader
                 }
             }
 
-            // Second pass: Handle errors
             var errors = failures.Where(f => f.GetSeverity() == FailureSeverity.Error).ToList();
             foreach (var error in errors)
             {
                 HandleError(failuresAccessor, error);
             }
 
-            // Check if any critical errors remain
             var remainingErrors = failuresAccessor.GetFailureMessages()
                 .Where(f => f.GetSeverity() == FailureSeverity.Error)
                 .ToList();
@@ -258,7 +238,6 @@ namespace ADNPlugin.Revit.FileUpgrader
                 HasCriticalErrors = true;
                 LogError($"{remainingErrors.Count} errors could not be resolved");
 
-                // Log details of unresolved errors
                 foreach (var error in remainingErrors)
                 {
                     LogError($"Unresolved error: {error.GetDescriptionText()}");
@@ -277,10 +256,8 @@ namespace ADNPlugin.Revit.FileUpgrader
             LogWithTimestamp($"Processing error: {description}");
             LogWithTimestamp($"Failure ID: {failureGuid}");
 
-            // Handle specific known failures
             if (failureGuid == new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"))
             {
-                // Dimension references not parallel
                 LogWithTimestamp("Detected dimension reference error - attempting to fix");
                 if (TryResolveOrDelete(failuresAccessor, error))
                 {
@@ -290,7 +267,6 @@ namespace ADNPlugin.Revit.FileUpgrader
             }
             else if (failureGuid == new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"))
             {
-                // Family network connectivity
                 LogWithTimestamp("Detected network connectivity error - attempting to fix");
                 if (TryResolveOrDelete(failuresAccessor, error))
                 {
@@ -300,7 +276,6 @@ namespace ADNPlugin.Revit.FileUpgrader
             }
             else if (failureGuid == new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173"))
             {
-                // Line is too short - usually safe to delete elements
                 LogWithTimestamp("Detected 'line too short' error - will delete elements");
                 if (TryDeleteFailingElements(failuresAccessor, error))
                 {
@@ -309,7 +284,6 @@ namespace ADNPlugin.Revit.FileUpgrader
             }
             else
             {
-                // Generic error handling
                 LogWithTimestamp("Unknown error type - attempting generic resolution");
                 if (TryResolveOrDelete(failuresAccessor, error))
                 {
@@ -320,7 +294,6 @@ namespace ADNPlugin.Revit.FileUpgrader
 
         private bool TryResolveOrDelete(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
         {
-            // First try to resolve using available resolutions
             if (error.HasResolutions())
             {
                 try
@@ -335,7 +308,6 @@ namespace ADNPlugin.Revit.FileUpgrader
                 }
             }
 
-            // If resolution failed or unavailable, try to delete elements
             return TryDeleteFailingElements(failuresAccessor, error);
         }
 
@@ -361,8 +333,6 @@ namespace ADNPlugin.Revit.FileUpgrader
 
         public void Dismiss(Document document)
         {
-            // This method is called when the failure processing dialog would normally be dismissed
-            // We don't need to do anything here for DA
             LogWithTimestamp("Failure processor dismissed");
         }
 

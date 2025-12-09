@@ -1,11 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.12.35707.178 d17.12
+# Visual Studio Version 18
+VisualStudioVersion = 18.0.11205.157 d18.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileUpgrader", "FileUpgrader.csproj", "{3F845775-4EAB-4F4C-B33C-2C1E27AB78F4}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileUpgrader2024", "..\FileUpgrader2024\FileUpgrader2024.csproj", "{70ACD80D-8DBA-4235-96AE-036F81F16987}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileUpgrader2025", "..\FileUpgrader2025\FileUpgrader2025.csproj", "{271C49C1-5A2D-4C07-A793-87E496B2441A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,8 +23,15 @@ Global
 		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{70ACD80D-8DBA-4235-96AE-036F81F16987}.Release|Any CPU.Build.0 = Release|Any CPU
+		{271C49C1-5A2D-4C07-A793-87E496B2441A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{271C49C1-5A2D-4C07-A793-87E496B2441A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{271C49C1-5A2D-4C07-A793-87E496B2441A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{271C49C1-5A2D-4C07-A793-87E496B2441A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C32ABF1B-D587-4387-A34E-C9AF748540AE}
 	EndGlobalSection
 EndGlobal
