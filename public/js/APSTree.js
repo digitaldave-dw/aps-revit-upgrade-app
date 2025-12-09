@@ -1376,7 +1376,7 @@ function initializeProjectUpgrade() {
                   <label>Target Revit Version:</label>
                   <div class="radio">
                     <label>
-                      <input type="radio" name="projectTargetVersion" value="2023" checked>
+                      <input type="radio" name="projectTargetVersion" value="2023">
                       Revit 2023
                     </label>
                   </div>
@@ -1384,6 +1384,12 @@ function initializeProjectUpgrade() {
                     <label>
                       <input type="radio" name="projectTargetVersion" value="2024">
                       Revit 2024
+                    </label>
+                  </div>
+                  <div class="radio">
+                    <label>
+                      <input type="radio" name="projectTargetVersion" value="2025" checked>
+                      Revit 2025
                     </label>
                   </div>
                 </div>

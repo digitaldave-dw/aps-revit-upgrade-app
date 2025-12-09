@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-**APS Revit File Upgrader** - A full-stack web application that automates upgrading Autodesk Revit files (projects, families, templates) to newer versions (2023/2024) using APS (Autodesk Platform Services) Design Automation API with real-time WebSocket progress tracking.
+**APS Revit File Upgrader** - A full-stack web application that automates upgrading Autodesk Revit files (projects, families, templates) to newer versions (2023/2024/2025) using APS (Autodesk Platform Services) Design Automation API with real-time WebSocket progress tracking.
 
 ## Tech Stack
 
 - **Backend:** Node.js 14+, Express 4.17.2, Socket.IO 4.7.2
 - **Frontend:** jQuery 3.3.1, Bootstrap 3.4.1, jsTree 3.3.7
 - **APS Integration:** forge-apis 0.9.7
-- **Revit Plugin:** C# / .NET Framework 4.8 / Revit API
+- **Revit Plugin:** C# / .NET Framework 4.8 (2023/2024) or .NET 8 (2025) / Revit API
 
 ## Directory Structure
 
@@ -71,7 +71,7 @@ DESIGN_AUTOMATION_ACTIVITY_ALIAS
 
 - Max 5 concurrent file upgrades
 - Workshared files are automatically skipped
-- Only supports upgrade to Revit 2023 and 2024
+- Only supports upgrade to Revit 2023, 2024, and 2025
 - Works only with BIM360 (not local files)
 - Requires valid APS credentials and app provisioning
 
