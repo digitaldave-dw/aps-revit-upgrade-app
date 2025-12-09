@@ -88,7 +88,9 @@ namespace ADNPlugin.Revit.FileUpgrader2024
             {
                 LogWithTimestamp("Starting document processing");
 
+                Application rvtApp = data.RevitApp;
                 Document doc = data.RevitDoc;
+
                 if (doc == null)
                 {
                     LogError("Document is null - cannot process");
@@ -102,18 +104,50 @@ namespace ADNPlugin.Revit.FileUpgrader2024
                 LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
                 LogWithTimestamp($"Is Detached: {doc.IsDetached}");
 
+                // Handle workshared files that need to be detached
+                if (doc.IsWorkshared && !doc.IsDetached)
+                {
+                    LogWithTimestamp("Document is workshared but not detached - reopening as detached");
+
+                    string filePath = doc.PathName;
+
+                    // Close the current document without saving
+                    doc.Close(false);
+                    LogWithTimestamp("Closed workshared document");
+
+                    // Reopen with detach options
+                    ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(filePath);
+                    OpenOptions openOptions = new OpenOptions();
+                    openOptions.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets;
+
+                    // Set up workset configuration to open all worksets
+                    WorksetConfiguration worksetConfig = new WorksetConfiguration(WorksetConfigurationOption.OpenAllWorksets);
+                    openOptions.SetOpenWorksetsConfiguration(worksetConfig);
+
+                    LogWithTimestamp("Reopening document as detached with all worksets...");
+                    doc = rvtApp.OpenDocumentFile(modelPath, openOptions);
+
+                    if (doc == null)
+                    {
+                        LogError("Failed to reopen document as detached");
+                        return false;
+                    }
+
+                    LogWithTimestamp($"Document reopened successfully - Is Detached: {doc.IsDetached}");
+                }
+
                 // Save the upgraded file
                 string outputPath = "revitupgrade.rvt";
                 LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
 
-                ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
+                ModelPath outputModelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
 
                 SaveAsOptions saveOptions = new SaveAsOptions();
                 saveOptions.OverwriteExistingFile = true;
                 saveOptions.Compact = true; // Compact can help fix issues
                 saveOptions.MaximumBackups = 1;
 
-                // Configure worksharing if needed
+                // Configure worksharing if needed (even for detached docs)
                 if (doc.IsWorkshared)
                 {
                     LogWithTimestamp("Document is workshared - configuring worksharing save options");
@@ -125,7 +159,7 @@ namespace ADNPlugin.Revit.FileUpgrader2024
 
                 LogWithTimestamp("Saving upgraded file...");
                 var saveStart = DateTime.Now;
-                doc.SaveAs(modelPath, saveOptions);
+                doc.SaveAs(outputModelPath, saveOptions);
                 var saveTime = (DateTime.Now - saveStart).TotalSeconds;
                 LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
 
