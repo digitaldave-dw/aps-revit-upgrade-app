@@ -31,12 +31,12 @@ const {
 
 const { OAuth } = require('./common/oauthImp');
 
-const { 
-    getWorkitemStatus, 
+const {
+    getWorkitemStatus,
     cancelWorkitem,
-    upgradeFile, 
-    getLatestVersionInfo, 
-    getNewCreatedStorageInfo, 
+    upgradeFile,
+    getLatestVersionInfo,
+    getNewCreatedStorageInfo,
     createBodyOfPostVersion,
     createBodyOfPostItem,
     workitemList,
@@ -44,7 +44,12 @@ const {
     logPayload,
     createNewVersionDirectApi,
     checkFileExists,
-} = require('./common/da4revitImp')
+} = require('./common/da4revitImp');
+
+const {
+    getFolderContentsForUpgrade,
+    isWorksharingFile
+} = require('./common/datamanagementImp');
 
 const SOCKET_TOPIC_WORKITEM = 'Workitem-Notification';
 const SOCKET_TOPIC_BULK_PROGRESS = 'Bulk-Progress-Notification';
@@ -330,6 +335,7 @@ class BulkProcessingQueue {
             console.log(`📤 Submitting to DA: ${file.fileItemName}`);
             console.log(`   Target: Revit ${options.targetVersion}`);
             console.log(`   Operation: ${file.isInPlaceUpgrade ? 'Create new version' : 'Create new item'}`);
+            console.log(`   Should Detach: ${file.shouldDetach || false}`);
 
             // Submit to Design Automation with target version
             const upgradeRes = await upgradeFile(
@@ -337,11 +343,12 @@ class BulkProcessingQueue {
                 storageInfo.StorageId,         // Output storage
                 targetProjectId,               // Project for version/item creation
                 createPayload,                 // Version or item creation payload
-                fileExtension, 
-                options.oauth_token, 
+                fileExtension,
+                options.oauth_token,
                 options.oauth_token_2legged,
                 file.isInPlaceUpgrade,         // isNewVersion flag
-                options.targetVersion          // Target Revit version
+                options.targetVersion,         // Target Revit version
+                file.shouldDetach || false     // Detach workshared flag for 2025
             );
 
             // Store all necessary data for webhook callback
@@ -573,10 +580,10 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
     }
 
     // Validate target version
-    if (targetVersion !== '2023' && targetVersion !== '2024') {
-        return res.status(400).json({ 
+    if (targetVersion !== '2023' && targetVersion !== '2024' && targetVersion !== '2025') {
+        return res.status(400).json({
             error: 'Invalid target version',
-            message: 'Target version must be either 2023 or 2024'
+            message: 'Target version must be 2023, 2024, or 2025'
         });
     }
 
@@ -814,9 +821,9 @@ router.post('/da4revit/v1/upgrader/files', async (req, res, next) => {
     const projectId = params[params.length - 3];
 
     // Validate target version
-    if (targetVersion !== '2023' && targetVersion !== '2024') {
+    if (targetVersion !== '2023' && targetVersion !== '2024' && targetVersion !== '2025') {
         console.log('info: Invalid target version specified');
-        res.status(400).end('Target version must be either 2023 or 2024');
+        res.status(400).end('Target version must be 2023, 2024, or 2025');
         return;
     }
 
@@ -964,9 +971,9 @@ router.post('/da4revit/v1/upgrader/files/:source_file_url/folders/:destinate_fol
     const destinateProjectId = destinateFolderParams[destinateFolderParams.length - 3];
 
     // Validate target version
-    if (targetVersion !== '2023' && targetVersion !== '2024') {
+    if (targetVersion !== '2023' && targetVersion !== '2024' && targetVersion !== '2025') {
         console.log('info: Invalid target version specified');
-        res.status(400).end('Target version must be either 2023 or 2024');
+        res.status(400).end('Target version must be 2023, 2024, or 2025');
         return;
     }
 
@@ -1470,14 +1477,15 @@ router.post('/callback/designautomation', async (req, res, next) => {
 // This replaces the existing /da4revit/v1/upgrader/project endpoint in da4revit.js
 
 router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
-    const { 
-        sourceProjectId, 
-        destinationProjectId, 
+    const {
+        sourceProjectId,
+        destinationProjectId,
         targetVersion = "2023",
         supportedTypes = ['rvt', 'rfa', 'rte'],
         maintainStructure = true,
         skipExisting = false,
-        includeWorkshared = false
+        includeWorkshared = false,
+        detachWorkshared = false  // NEW: For Revit 2025, detach workshared files before upgrade
     } = req.body;
 
     // Validate inputs
@@ -1490,11 +1498,14 @@ router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
     const isInPlaceUpgrade = sourceProjectId === destinationProjectId;
 
     // Validate target version
-    if (targetVersion !== '2023' && targetVersion !== '2024') {
-        return res.status(400).json({ 
-            error: 'Invalid target version. Must be either 2023 or 2024' 
+    if (targetVersion !== '2023' && targetVersion !== '2024' && targetVersion !== '2025') {
+        return res.status(400).json({
+            error: 'Invalid target version. Must be 2023, 2024, or 2025'
         });
     }
+
+    // For Revit 2025, automatically enable detachWorkshared if includeWorkshared is true
+    const shouldDetachWorkshared = targetVersion === '2025' && (detachWorkshared || includeWorkshared);
 
     try {
         console.log('🚀 Starting OPTIMIZED project upgrade:', {
@@ -1502,7 +1513,8 @@ router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
             destination: destinationProjectId,
             targetVersion,
             isInPlaceUpgrade,
-            mode: isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-PROJECT'
+            mode: isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-PROJECT',
+            shouldDetachWorkshared
         });
 
         // Import helper functions
@@ -1622,24 +1634,34 @@ router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
                         }
                         
                         stats.revitFiles++;
-                        
-                        // Skip workshared files unless explicitly requested
-                        if (!includeWorkshared && isWorksharingFile(item)) {
-                            stats.worksharedSkipped++;
-                            skippedFiles.workshared.push(name);
-                            console.log(`⏭️  Skipping workshared file: ${name}`);
-                            return;
+
+                        // Check if file is workshared
+                        const isWorkshared = isWorksharingFile(item);
+
+                        // For Revit 2025, we can process workshared files by detaching them
+                        if (isWorkshared) {
+                            if (shouldDetachWorkshared) {
+                                // Mark this file for detach during processing
+                                console.log(`🔓 Workshared file will be detached for 2025 upgrade: ${name}`);
+                            } else if (!includeWorkshared) {
+                                stats.worksharedSkipped++;
+                                skippedFiles.workshared.push(name);
+                                console.log(`⏭️  Skipping workshared file: ${name}`);
+                                return;
+                            }
                         }
                         
                         try {
                             // CRITICAL: Check if file needs upgrade using version detector
+                            // Pass allowWorkshared=true for 2025 detach mode to process workshared files
                             const needsUpgrade = await versionDetector.needsUpgrade(
                                 sourceProjectId,
                                 item.id,
                                 name,
                                 targetVersion,
                                 req.oauth_client,
-                                req.oauth_token
+                                req.oauth_token,
+                                isWorkshared && shouldDetachWorkshared  // Allow workshared if detaching for 2025
                             );
                             
                             if (!needsUpgrade) {
@@ -1671,7 +1693,8 @@ router.post('/da4revit/v1/upgrader/project', async (req, res, next) => {
                                 itemId: item.id,
                                 path: item.path || structure.path,
                                 extensionType: item.attributes?.extension?.type || 'unknown',
-                                isInPlaceUpgrade: isInPlaceUpgrade
+                                isInPlaceUpgrade: isInPlaceUpgrade,
+                                shouldDetach: isWorkshared && shouldDetachWorkshared  // For workshared files in 2025 upgrade
                             });
                             
                         } catch (error) {
@@ -1761,7 +1784,8 @@ ${JSON.stringify(versionDetector.getStats(), null, 2)}
             oauth_token: req.oauth_token,
             oauth_token_2legged,
             projectUpgradeContext: projectUpgradeJob,
-            isInPlaceUpgrade
+            isInPlaceUpgrade,
+            shouldDetachWorkshared  // Pass detach flag to bulk processor
         });
 
         const totalTime = (Date.now() - startTime) / 1000;

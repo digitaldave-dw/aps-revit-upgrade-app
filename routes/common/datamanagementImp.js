@@ -584,52 +584,54 @@ function extractHubId(projectId) {
  * @param {object} oauth_token - OAuth token
  * @returns {object} Mapping of source to destination folder IDs
  */
-async function createFolderStructure(projectId, folderStructure, parentFolderId, oauth_client, oauth_token) {
+async function createFolderStructure(projectId, folderStructure, parentFolderId, oauth_client, oauth_token, retryCount = 0) {
+    const MAX_RETRIES = 3;
     const folderMapping = {};
     const folders = new FoldersApi();
-    
+
     try {
         // Skip if this is the root node
         if (folderStructure.type === 'root') {
             // Process root folders
             for (const rootFolder of folderStructure.folders) {
                 const rootMapping = await createFolderStructure(
-                    projectId, 
-                    rootFolder, 
+                    projectId,
+                    rootFolder,
                     null, // Root folders don't have parents in the API sense
-                    oauth_client, 
-                    oauth_token
+                    oauth_client,
+                    oauth_token,
+                    0
                 );
                 Object.assign(folderMapping, rootMapping);
             }
             return folderMapping;
         }
-        
+
         // Check if folder already exists in destination
         let destinationFolderId = null;
-        
+
         if (parentFolderId) {
             // Get contents of parent folder to check for existing folder
             const parentContents = await folders.getFolderContents(
-                projectId, 
-                parentFolderId, 
-                {}, 
-                oauth_client, 
+                projectId,
+                parentFolderId,
+                {},
+                oauth_client,
                 oauth_token
             );
-            
+
             // Look for folder with same name
             const existingFolder = parentContents.body.data.find(
-                item => item.type === 'folders' && 
+                item => item.type === 'folders' &&
                         item.attributes.name === folderStructure.name
             );
-            
+
             if (existingFolder) {
                 destinationFolderId = existingFolder.id;
                 console.log(`Folder already exists: ${folderStructure.path}`);
             }
         }
-        
+
         // Create folder if it doesn't exist
         if (!destinationFolderId && parentFolderId) {
             const createFolderBody = {
@@ -653,7 +655,7 @@ async function createFolderStructure(projectId, folderStructure, parentFolderId,
                     }
                 }
             };
-            
+
             try {
                 const newFolder = await postFolder(projectId, createFolderBody, oauth_client, oauth_token);
                 destinationFolderId = newFolder.body.data.id;
@@ -661,9 +663,13 @@ async function createFolderStructure(projectId, folderStructure, parentFolderId,
             } catch (error) {
                 if (error.statusCode === 409) {
                     // Folder was created by another process, try to find it again
-                    console.log(`Folder creation conflict, retrying: ${folderStructure.path}`);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    return await createFolderStructure(projectId, folderStructure, parentFolderId, oauth_client, oauth_token);
+                    if (retryCount >= MAX_RETRIES) {
+                        console.error(`Max retries reached for folder: ${folderStructure.path}`);
+                        throw new Error(`Failed to create or find folder after ${MAX_RETRIES} retries: ${folderStructure.path}`);
+                    }
+                    console.log(`Folder creation conflict, retrying (${retryCount + 1}/${MAX_RETRIES}): ${folderStructure.path}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+                    return await createFolderStructure(projectId, folderStructure, parentFolderId, oauth_client, oauth_token, retryCount + 1);
                 }
                 throw error;
             }
@@ -685,11 +691,12 @@ async function createFolderStructure(projectId, folderStructure, parentFolderId,
         // Recursively create subfolders
         for (const subfolder of folderStructure.folders || []) {
             const subMapping = await createFolderStructure(
-                projectId, 
-                subfolder, 
-                destinationFolderId, 
-                oauth_client, 
-                oauth_token
+                projectId,
+                subfolder,
+                destinationFolderId,
+                oauth_client,
+                oauth_token,
+                0  // Reset retry count for new folder
             );
             Object.assign(folderMapping, subMapping);
         }

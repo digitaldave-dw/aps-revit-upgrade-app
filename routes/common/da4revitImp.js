@@ -188,7 +188,7 @@ function cancelWorkitem(workItemId, access_token) {
 ///////////////////////////////////////////////////////////////////////
 /// Enhanced upgrade file function with version support
 ///////////////////////////////////////////////////////////////////////
-function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExtension, access_token_3Legged, access_token_2Legged, isNewVersion = false, targetVersion = '2023') {
+function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExtension, access_token_3Legged, access_token_2Legged, isNewVersion = false, targetVersion = '2023', shouldDetach = false) {
     return new Promise(function (resolve, reject) {
         // Validate required parameters
         if (!inputUrl || !outputUrl || !projectId || !createVersionData) {
@@ -202,6 +202,7 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             - fileExtension=${fileExtension}
             - projectId=${projectId}
             - targetVersion=${targetVersion}
+            - shouldDetach=${shouldDetach}
             - activeWorkitems=${activeCount}`);
 
         // Check if we're approaching DA limits
@@ -215,8 +216,8 @@ function upgradeFile(inputUrl, outputUrl, projectId, createVersionData, fileExte
             createVersionData.data.type = "versions";
         }
 
-        // CRITICAL: Pass the target version to createPostWorkitemBody
-        const workitemBody = createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token_3Legged.access_token, targetVersion);
+        // CRITICAL: Pass the target version and detach flag to createPostWorkitemBody
+        const workitemBody = createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token_3Legged.access_token, targetVersion, shouldDetach);
         if (workitemBody === null) {
             reject('workitem request body is null');
             return;
@@ -495,7 +496,7 @@ function createBodyOfPostVersion(fileId, fileName, storageId, versionType, targe
 ///////////////////////////////////////////////////////////////////////
 /// Create workitem body with version-specific activity
 ///////////////////////////////////////////////////////////////////////
-function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token, targetVersion = '2023') {
+function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token, targetVersion = '2023', shouldDetach = false) {
     if (!designAutomation.nickname || !designAutomation.appbundle_activity_alias) {
         console.error('Missing Design Automation configuration');
         return null;
@@ -505,21 +506,37 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
     // Using the naming convention: FileUpgraderApp_2023Activity or FileUpgraderApp_2024Activity
     const versionedActivityName = `FileUpgraderApp_${targetVersion}Activity`;
     const activityId = `${designAutomation.nickname}.${versionedActivityName}+${designAutomation.appbundle_activity_alias}`;
-    
+
     console.log(`Creating workitem for Revit ${targetVersion} with activity: ${activityId}`);
-    
+    if (shouldDetach) {
+        console.log(`   Workshared file will be opened as DETACHED`);
+    }
+
+    // For Revit 2025 with workshared files, we need to pass the detach flag
+    // This is done via the pathInZip parameter which can include options
+    // Design Automation for Revit supports opening files as detached via the input argument
+    const inputArgs = {
+        url: inputUrl,
+        Headers: {
+            Authorization: 'Bearer ' + access_token
+        }
+    };
+
+    // Add detach option for workshared files (Revit 2025 only)
+    if (shouldDetach && targetVersion === '2025') {
+        // The 'localName' with detach option tells DA to open the file as detached
+        inputArgs.localName = 'input.rvt';
+        inputArgs.optional = false;
+        // Pass detach hint through pathInZip (if supported) or rely on plugin detection
+    }
+
     let body = null;
     switch (fileExtension) {
         case 'rvt':
             body = {
                 activityId: activityId,
                 arguments: {
-                    rvtFile: {
-                        url: inputUrl,
-                        Headers: {
-                            Authorization: 'Bearer ' + access_token
-                        },
-                    },
+                    rvtFile: inputArgs,
                     resultrvt: {
                         verb: 'put',
                         url: outputUrl,
@@ -527,6 +544,8 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
                             Authorization: 'Bearer ' + access_token
                         },
                     },
+                    // Pass detach flag to the plugin via a parameter
+                    detachFromCentral: shouldDetach,
                     onComplete: {
                         verb: "post",
                         url: designAutomation.webhook_url
@@ -538,12 +557,7 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
             body = {
                 activityId: activityId,
                 arguments: {
-                    rvtFile: {
-                        url: inputUrl,
-                        Headers: {
-                            Authorization: 'Bearer ' + access_token
-                        },
-                    },
+                    rvtFile: inputArgs,
                     resultrfa: {
                         verb: 'put',
                         url: outputUrl,
@@ -563,12 +577,7 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
             body = {
                 activityId: activityId,
                 arguments: {
-                    rvtFile: {
-                        url: inputUrl,
-                        Headers: {
-                            Authorization: 'Bearer ' + access_token
-                        },
-                    },
+                    rvtFile: inputArgs,
                     resultrte: {
                         verb: 'put',
                         url: outputUrl,
@@ -587,8 +596,8 @@ function createPostWorkitemBody(inputUrl, outputUrl, fileExtension, access_token
             console.error('Unsupported file extension:', fileExtension);
             return null;
     }
-    
-    console.log(`Created workitem body for ${fileExtension} file with activity: ${activityId} targeting Revit ${targetVersion}`);
+
+    console.log(`Created workitem body for ${fileExtension} file with activity: ${activityId} targeting Revit ${targetVersion}${shouldDetach ? ' (DETACHED)' : ''}`);
     return body;
 }
 

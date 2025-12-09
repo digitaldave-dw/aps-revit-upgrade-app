@@ -50,33 +50,43 @@ class EnhancedRevitVersionDetector {
     /**
      * Enhanced main method to check if a file needs upgrading
      * Now includes workshared detection and better error handling
+     * @param {boolean} allowWorkshared - If true, don't skip workshared files (for Revit 2025 detach mode)
      */
-    async needsUpgrade(projectId, itemId, itemName, targetVersion, oauth_client, oauth_token) {
+    async needsUpgrade(projectId, itemId, itemName, targetVersion, oauth_client, oauth_token, allowWorkshared = false) {
         this.stats.totalChecks++;
         const targetVersionNum = parseInt(targetVersion);
-        
+
         // Create composite cache key
         const cacheKey = `${projectId}:${itemId}`;
         const cachedData = this.getCachedVersion(cacheKey);
-        
+
         if (cachedData) {
             this.stats.cacheHits++;
             console.log(`📦 Cache hit: ${itemName} is Revit ${cachedData.version}${cachedData.isWorkshared ? ' (WORKSHARED)' : ''}`);
-            
-            // Return false if workshared OR already at target version
-            if (cachedData.isWorkshared) {
+
+            // Return false if workshared (unless allowWorkshared is true) OR already at target version
+            if (cachedData.isWorkshared && !allowWorkshared) {
                 this.stats.worksharedDetected++;
                 return false;
             }
+            // For workshared files with allowWorkshared, assume they need upgrade (we can't easily detect version)
+            if (cachedData.isWorkshared && allowWorkshared) {
+                this.stats.worksharedDetected++;
+                return true;
+            }
             return cachedData.version < targetVersionNum;
         }
-        
+
         try {
             // First, check if this is a workshared file
             const isWorkshared = await this.isWorksharedFile(projectId, itemId, oauth_client, oauth_token);
             if (isWorkshared) {
                 this.stats.worksharedDetected++;
                 this.setCachedVersion(cacheKey, null, true);
+                if (allowWorkshared) {
+                    console.log(`🔓 Workshared file detected: ${itemName} - will be detached for upgrade`);
+                    return true;  // Process it with detach
+                }
                 console.log(`🔒 Workshared file detected: ${itemName} - skipping upgrade`);
                 return false;
             }
