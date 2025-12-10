@@ -178,23 +178,16 @@ class BulkProcessingQueue {
             
             // Submit to Design Automation
             const result = await this.submitToDesignAutomation(file, bulkJob.options);
-            
+
             if (result.success) {
                 // File submitted successfully - it will complete via webhook
                 file.workItemId = result.workItemId;
                 file.status = 'submitted';
                 bulkJob.submittedFiles++;
-                
-                // Store workitem info for webhook callback
-                if (!global.bulkJobWorkitems) {
-                    global.bulkJobWorkitems = new Map();
-                }
-                global.bulkJobWorkitems.set(result.workItemId, {
-                    bulkJob,
-                    file,
-                    processingKey
-                });
-                
+
+                // Note: bulkJobWorkitems is already set inside submitToDesignAutomation
+                // with all the necessary data (createVersionData, projectId, session, etc.)
+
                 console.log(`File submitted to DA: ${file.fileItemName}, workitem: ${result.workItemId}`);
             } else {
                 throw new Error(result.error || 'Failed to submit to DA');
