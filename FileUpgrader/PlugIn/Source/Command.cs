@@ -88,37 +88,9 @@ namespace ADNPlugin.Revit.FileUpgrader
                 LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
                 LogWithTimestamp($"Is Detached: {doc.IsDetached}");
 
-                // Handle workshared files that need to be detached
-                if (doc.IsWorkshared && !doc.IsDetached)
-                {
-                    LogWithTimestamp("Document is workshared but not detached - reopening as detached");
-
-                    string filePath = doc.PathName;
-
-                    // Close the current document without saving
-                    doc.Close(false);
-                    LogWithTimestamp("Closed workshared document");
-
-                    // Reopen with detach options
-                    ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(filePath);
-                    OpenOptions openOptions = new OpenOptions();
-                    openOptions.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets;
-
-                    // Set up workset configuration to open all worksets
-                    WorksetConfiguration worksetConfig = new WorksetConfiguration(WorksetConfigurationOption.OpenAllWorksets);
-                    openOptions.SetOpenWorksetsConfiguration(worksetConfig);
-
-                    LogWithTimestamp("Reopening document as detached with all worksets...");
-                    doc = rvtApp.OpenDocumentFile(modelPath, openOptions);
-
-                    if (doc == null)
-                    {
-                        LogError("Failed to reopen document as detached");
-                        return false;
-                    }
-
-                    LogWithTimestamp($"Document reopened successfully - Is Detached: {doc.IsDetached}");
-                }
+                // Note: Design Automation automatically opens workshared files as detached
+                // (notice the _detached suffix in the document title)
+                // We just need to save with proper worksharing options
 
                 if (_failureProcessor.HasCriticalErrors)
                 {
@@ -139,12 +111,14 @@ namespace ADNPlugin.Revit.FileUpgrader
                 saveOptions.Compact = false;
                 saveOptions.MaximumBackups = 1;
 
-                // For workshared documents (even detached ones), configure save options
+                // CRITICAL: For workshared documents (including detached ones),
+                // you MUST use WorksharingSaveAsOptions with SaveAsCentral = true
+                // This is required by Revit API for any workshared document
                 if (doc.IsWorkshared)
                 {
-                    LogWithTimestamp("Document is workshared - configuring worksharing save options");
+                    LogWithTimestamp("Document is workshared - configuring worksharing save options with SaveAsCentral=true");
                     WorksharingSaveAsOptions wsOptions = new WorksharingSaveAsOptions();
-                    wsOptions.SaveAsCentral = true;
+                    wsOptions.SaveAsCentral = true;  // REQUIRED for workshared/detached documents
                     wsOptions.OpenWorksetsDefault = SimpleWorksetConfiguration.AllWorksets;
                     saveOptions.SetWorksharingOptions(wsOptions);
                 }
