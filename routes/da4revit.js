@@ -617,30 +617,31 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
         
         // Process each file with version detection
         console.log('🔍 Analyzing files for upgrade necessity...');
-        
+
         for (const item of folderData.upgradeableItems) {
             stats.totalFiles++;
             const fileName = item.attributes.displayName || item.attributes.name;
-            
-            // Skip workshared files (this check is already in your code)
-            if (isWorksharingFile(item)) {
-                stats.worksharedSkipped++;
-                skippedFiles.workshared.push(fileName);
-                console.log(`⏭️  Skipping workshared file: ${fileName}`);
-                continue;
+
+            // Check if workshared - will be processed with detach option
+            const isWorkshared = isWorksharingFile(item);
+            if (isWorkshared) {
+                stats.worksharedSkipped++; // Count for reporting, but don't skip
+                console.log(`🔗 Workshared file detected (will detach): ${fileName}`);
             }
-            
+
             try {
                 // Here's the key addition - check if file needs upgrade
+                // Pass allowWorkshared=true to process workshared files with detach
                 const needsUpgrade = await versionDetector.needsUpgrade(
                     projectId,
                     item.id,
                     fileName,
                     targetVersion,
                     req.oauth_client,
-                    req.oauth_token
+                    req.oauth_token,
+                    true  // allowWorkshared - process workshared files with detach
                 );
-                
+
                 if (!needsUpgrade) {
                     // File is already at or above target version
                     stats.alreadyUpgraded++;
@@ -648,7 +649,7 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     console.log(`✅ Already at target version: ${fileName}`);
                     continue;
                 }
-                
+
                 // File needs upgrade - add to processing queue
                 stats.needsUpgrade++;
                 filesToUpgrade.push({
@@ -656,9 +657,14 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     fileItemName: fileName,
                     projectId: projectId,
                     itemId: item.id,
-                    extensionType: item.attributes.extension?.type || 'unknown'
+                    extensionType: item.attributes.extension?.type || 'unknown',
+                    // Add required properties for submitToDesignAutomation
+                    isInPlaceUpgrade: true,
+                    sourceProjectId: projectId,
+                    destinationProjectId: projectId,
+                    shouldDetach: isWorkshared  // Detach workshared files during upgrade
                 });
-                
+
             } catch (error) {
                 console.error(`Error checking version for ${fileName}:`, error);
                 stats.checkErrors++;
@@ -1197,69 +1203,68 @@ router.post('/callback/designautomation', async (req, res, next) => {
             try {
                 // Handle bulk processing workitem
                 if (bulkWorkitemInfo) {
-                    const { bulkJob, file } = bulkWorkitemInfo;
-                    
+                    const { bulkJob, file, createVersionData, projectId, oauth_client, oauth_token } = bulkWorkitemInfo;
+
                     console.log(`Processing bulk workitem callback for file: ${file.fileItemName}`);
-                    
-                    // Get the stored version creation data
-                    const workitemData = workitemTracker.getWorkitem(req.body.id);
-                    if (!workitemData || !workitemData.createVersionData) {
+
+                    // Use data from bulkWorkitemInfo (stored when workitem was submitted)
+                    if (!createVersionData) {
                         console.error('Missing version creation data for bulk workitem');
                         workitemStatus.Status = 'Failed';
                         workitemStatus.Error = 'Missing version creation data';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-                        
+
                         // Update tracker and bulk queue
                         workitemTracker.failWorkitem(req.body.id, 'Missing version data');
                         bulkQueue.handleFileFailed(file, bulkJob, new Error('Missing version data'));
                         return;
                     }
-                    
-                    // Get credentials from bulk job options
-                    const credentials = bulkJob.options.oauth_token;
-                    const oauth_client = bulkJob.options.oauth_client;
-                    
+
+                    // Get credentials from bulkWorkitemInfo (stored when workitem was submitted)
+                    const credentials = oauth_token || bulkJob.options.oauth_token;
+                    const oauthClient = oauth_client || bulkJob.options.oauth_client;
+
                     if (!credentials || !credentials.access_token) {
                         console.log("No valid token available for bulk processing operation");
                         workitemStatus.Status = 'Failed';
                         workitemStatus.Error = 'Authentication error - missing token';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-                        
+
                         // Update tracker and bulk queue
                         workitemTracker.failWorkitem(req.body.id, 'Authentication error');
                         bulkQueue.handleFileFailed(file, bulkJob, new Error('Authentication error'));
                         return;
                     }
-                    
+
                     // CRITICAL: Actually create the version in BIM360/ACC
                     console.log("Creating new version in BIM360/ACC for bulk processed file");
-                    console.log(`Project ID: ${workitemData.projectId}`);
-                    console.log(`Version data type: ${workitemData.createVersionData.data.type}`);
-                    
+                    console.log(`Project ID: ${projectId}`);
+                    console.log(`Version data type: ${createVersionData.data.type}`);
+
                     let version = null;
                     let retries = 3;
                     let lastError = null;
-                    
+
                     while (retries > 0 && !version) {
                         try {
-                            if (workitemData.createVersionData.data.type === 'versions') {
+                            if (createVersionData.data.type === 'versions') {
                                 const versions = new VersionsApi();
                                 version = await versions.postVersion(
-                                    workitemData.projectId, 
-                                    workitemData.createVersionData, 
-                                    oauth_client, 
+                                    projectId,
+                                    createVersionData,
+                                    oauthClient,
                                     credentials
                                 );
                             } else {
                                 const items = new ItemsApi();
                                 version = await items.postItem(
-                                    workitemData.projectId, 
-                                    workitemData.createVersionData, 
-                                    oauth_client, 
+                                    projectId,
+                                    createVersionData,
+                                    oauthClient,
                                     credentials
                                 );
                             }
-                            
+
                             if (version && version.statusCode === 201) {
                                 console.log(`Successfully created version for ${file.fileItemName}`);
                                 break; // Success
@@ -1267,14 +1272,14 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         } catch (err) {
                             lastError = err;
                             retries--;
-                            
+
                             if (retries > 0) {
                                 console.log(`Retry ${3 - retries}/3 after error:`, err.message);
                                 await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
                             }
                         }
                     }
-                    
+
                     if (version && version.statusCode === 201) {
                         console.log('Successfully created a new version of the file');
                         workitemStatus.Status = 'Completed';

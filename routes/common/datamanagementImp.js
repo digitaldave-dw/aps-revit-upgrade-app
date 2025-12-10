@@ -305,29 +305,28 @@ async function getFolderContents(projectId, folderId, oauthClient, credentials, 
 async function getFolderContentsForUpgrade(projectId, folderId, oauthClient, credentials) {
     const folders = new FoldersApi();
     const contents = await folders.getFolderContents(projectId, folderId, {}, oauthClient, credentials);
-    
-    // Filter out workshared files and return only upgradeable items
+
+    // Include all Revit files (including workshared - they will be detached during upgrade)
     const upgradeableItems = contents.body.data.filter((item) => {
         // Skip if not an item (could be a folder)
         if (item.type !== 'items') return false;
-        
+
         // Skip if no name
         const name = item.attributes.displayName || item.attributes.name;
         if (!name || name === '') return false;
-        
-        // Skip if workshared
+
+        // Note: Workshared files are now INCLUDED and will be detached during upgrade
         if (isWorksharingFile(item)) {
-            console.log(`Skipping workshared file: ${name}`);
-            return false;
+            console.log(`Including workshared file (will be detached): ${name}`);
         }
-        
+
         // Check file extension
         const extension = name.split('.').pop().toLowerCase();
         const supportedExtensions = ['rvt', 'rfa', 'rte'];
-        
+
         return supportedExtensions.includes(extension);
     });
-    
+
     return {
         allItems: contents.body.data,
         upgradeableItems: upgradeableItems,

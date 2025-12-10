@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
@@ -7,29 +7,26 @@ using Autodesk.Revit.ApplicationServices;
 using DesignAutomationFramework;
 using Autodesk.Revit.DB.Events;
 
-namespace ADNPlugin.Revit.FileUpgrader2024
+namespace FileUpgrader2025
 {
     [Autodesk.Revit.Attributes.Regeneration(Autodesk.Revit.Attributes.RegenerationOption.Manual)]
     [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
     public class FileUpgradeApp : IExternalDBApplication
     {
-        // Store reference to our failure processor
-        private static DocumentUpgradeFailureProcessor _failureProcessor;
+        private static FileUpgradeFailureProcessor _failureProcessor;
 
         public ExternalDBApplicationResult OnStartup(ControlledApplication application)
         {
-            Console.WriteLine("==== FILE UPGRADER STARTUP ====");
+            Console.WriteLine("==== FILE UPGRADER 2025 STARTUP ====");
             LogWithTimestamp("Application startup initiated");
 
             try
             {
-                // CRITICAL: Register the failure processor immediately on startup
-                // This ensures it's active BEFORE Design Automation tries to open the document
-                _failureProcessor = new DocumentUpgradeFailureProcessor();
-                Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(_failureProcessor);
-                LogWithTimestamp("Document upgrade failure processor registered successfully");
+                _failureProcessor = new FileUpgradeFailureProcessor();
 
-                // Subscribe to DesignAutomationReadyEvent
+                Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(_failureProcessor);
+                LogWithTimestamp("Global failure processor registered successfully");
+
                 DesignAutomationBridge.DesignAutomationReadyEvent += HandleDesignAutomationReadyEvent;
                 LogWithTimestamp("Subscribed to DesignAutomationReadyEvent");
 
@@ -49,31 +46,19 @@ namespace ADNPlugin.Revit.FileUpgrader2024
             try
             {
                 Application rvtApp = e.DesignAutomationData.RevitApp;
-                Document doc = e.DesignAutomationData.RevitDoc;
-
-                // Log current state
                 string versionInfo = $"Revit Version: {rvtApp.VersionNumber} Build: {rvtApp.VersionBuild}";
                 LogWithTimestamp(versionInfo);
 
-                // Log failure processor statistics to see what happened during document opening
-                LogWithTimestamp("=== DOCUMENT OPENING STATISTICS ===");
-                LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
-                LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
-                LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
-                LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
-                LogWithTimestamp($"Has unresolved errors: {_failureProcessor.HasUnresolvedErrors}");
-                LogWithTimestamp("===================================");
-
-                if (doc == null)
-                {
-                    LogError("Document is null - document opening failed despite failure handling");
-                    e.Succeeded = false;
-                    return;
-                }
-
-                LogWithTimestamp("Document opened successfully");
-                // Process and save the document
                 e.Succeeded = ProcessDocument(e.DesignAutomationData);
+
+                if (e.Succeeded)
+                {
+                    LogWithTimestamp("Document processing completed successfully");
+                }
+                else
+                {
+                    LogError("Document processing failed");
+                }
             }
             catch (Exception ex)
             {
@@ -93,11 +78,10 @@ namespace ADNPlugin.Revit.FileUpgrader2024
 
                 if (doc == null)
                 {
-                    LogError("Document is null - cannot process");
+                    LogError("Document is null - this should not happen");
                     return false;
                 }
 
-                // Log document information
                 LogWithTimestamp($"Document Title: {doc.Title}");
                 LogWithTimestamp($"Document Path: {doc.PathName}");
                 LogWithTimestamp($"Is Modified: {doc.IsModified}");
@@ -108,7 +92,15 @@ namespace ADNPlugin.Revit.FileUpgrader2024
                 // (notice the _detached suffix in the document title)
                 // We just need to save with proper worksharing options
 
-                // Save the upgraded file
+                if (_failureProcessor.HasCriticalErrors)
+                {
+                    LogError("Document was opened with critical errors that could not be resolved");
+                    LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
+                    LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
+                    LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
+                    LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
+                }
+
                 string outputPath = "revitupgrade.rvt";
                 LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
 
@@ -116,7 +108,7 @@ namespace ADNPlugin.Revit.FileUpgrader2024
 
                 SaveAsOptions saveOptions = new SaveAsOptions();
                 saveOptions.OverwriteExistingFile = true;
-                saveOptions.Compact = true; // Compact can help fix issues
+                saveOptions.Compact = false;
                 saveOptions.MaximumBackups = 1;
 
                 // CRITICAL: For workshared documents (including detached ones),
@@ -137,13 +129,14 @@ namespace ADNPlugin.Revit.FileUpgrader2024
                 var saveTime = (DateTime.Now - saveStart).TotalSeconds;
                 LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
 
-                // Log final statistics
-                LogWithTimestamp("=== UPGRADE COMPLETE - FINAL STATISTICS ===");
+                LogWithTimestamp("=== UPGRADE STATISTICS ===");
                 LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
                 LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
                 LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
                 LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
-                LogWithTimestamp("==========================================");
+                LogWithTimestamp($"Dimension errors fixed: {_failureProcessor.DimensionErrorsFixed}");
+                LogWithTimestamp($"Network connectivity errors fixed: {_failureProcessor.NetworkErrorsFixed}");
+                LogWithTimestamp("========================");
 
                 return true;
             }
@@ -156,16 +149,14 @@ namespace ADNPlugin.Revit.FileUpgrader2024
 
         public ExternalDBApplicationResult OnShutdown(ControlledApplication application)
         {
-            LogWithTimestamp("==== FILE UPGRADER SHUTDOWN ====");
+            LogWithTimestamp("==== FILE UPGRADER 2025 SHUTDOWN ====");
 
             try
             {
-                // Only unregister if we have a processor
                 if (_failureProcessor != null)
                 {
-                    Application.RegisterFailuresProcessor(null);
-                    LogWithTimestamp("Failure processor unregistered");
                     _failureProcessor = null;
+                    LogWithTimestamp("Failure processor cleaned up");
                 }
             }
             catch (Exception ex)
@@ -176,7 +167,6 @@ namespace ADNPlugin.Revit.FileUpgrader2024
             return ExternalDBApplicationResult.Succeeded;
         }
 
-        // Logging helper methods
         private static void LogWithTimestamp(string message)
         {
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
@@ -195,61 +185,74 @@ namespace ADNPlugin.Revit.FileUpgrader2024
     }
 
     /// <summary>
-    /// Custom failure processor that handles MEP-specific failures during file upgrades
+    /// Custom failure processor that handles all failures during the entire DA session,
+    /// including document opening failures which occur before any transaction context exists.
     /// </summary>
     public class FileUpgradeFailureProcessor : IFailuresProcessor
     {
-        // Statistics for logging
         public int TotalFailuresProcessed { get; private set; } = 0;
         public int WarningsDeleted { get; private set; } = 0;
         public int ErrorsResolved { get; private set; } = 0;
         public int ElementsDeleted { get; private set; } = 0;
+        public int DimensionErrorsFixed { get; private set; } = 0;
+        public int NetworkErrorsFixed { get; private set; } = 0;
+        public bool HasCriticalErrors { get; private set; } = false;
 
-        // Track specific MEP failure types
-        private readonly Dictionary<Guid, string> _mepFailures = new Dictionary<Guid, string>
+        private readonly HashSet<Guid> _knownFailureGuids = new HashSet<Guid>
         {
-            { new Guid("69f669cb-8551-49cb-b7d2-8213056b9578"), "Tap must be attached to duct" },
-            { new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"), "Family network connectivity" },
-            { new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"), "Dimension references not parallel" },
-            { new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173"), "Line is too short" }
+            new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"), // Dimension references not parallel
+            new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"), // Family network connectivity
+            new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173")  // Line is too short
         };
 
         public FailureProcessingResult ProcessFailures(FailuresAccessor failuresAccessor)
         {
             IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
 
-            LogWithTimestamp($"[PROCESSOR] Processing {failures.Count} failures");
-            TotalFailuresProcessed += failures.Count;
-
-            // First, handle all warnings
-            foreach (var failure in failures.ToList())
+            if (failures.Count == 0)
             {
-                if (failure.GetSeverity() == FailureSeverity.Warning)
+                return FailureProcessingResult.Continue;
+            }
+
+            TotalFailuresProcessed += failures.Count;
+            LogWithTimestamp($"Processing {failures.Count} failures");
+
+            var warnings = failures.Where(f => f.GetSeverity() == FailureSeverity.Warning).ToList();
+            foreach (var warning in warnings)
+            {
+                try
                 {
-                    try
-                    {
-                        failuresAccessor.DeleteWarning(failure);
-                        WarningsDeleted++;
-                        LogWithTimestamp($"[PROCESSOR] Deleted warning: {failure.GetDescriptionText()}");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogError("[PROCESSOR] Failed to delete warning", ex);
-                    }
+                    failuresAccessor.DeleteWarning(warning);
+                    WarningsDeleted++;
+                    LogWithTimestamp($"Deleted warning: {warning.GetDescriptionText()}");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Failed to delete warning: {warning.GetDescriptionText()}", ex);
                 }
             }
 
-            // Now handle errors
-            var errors = failuresAccessor.GetFailureMessages()
-                .Where(f => f.GetSeverity() == FailureSeverity.Error)
-                .ToList();
-
+            var errors = failures.Where(f => f.GetSeverity() == FailureSeverity.Error).ToList();
             foreach (var error in errors)
             {
                 HandleError(failuresAccessor, error);
             }
 
-            // Always return Continue to let the process proceed
+            var remainingErrors = failuresAccessor.GetFailureMessages()
+                .Where(f => f.GetSeverity() == FailureSeverity.Error)
+                .ToList();
+
+            if (remainingErrors.Count > 0)
+            {
+                HasCriticalErrors = true;
+                LogError($"{remainingErrors.Count} errors could not be resolved");
+
+                foreach (var error in remainingErrors)
+                {
+                    LogError($"Unresolved error: {error.GetDescriptionText()}");
+                }
+            }
+
             return FailureProcessingResult.Continue;
         }
 
@@ -259,106 +262,100 @@ namespace ADNPlugin.Revit.FileUpgrader2024
             FailureDefinitionId failureId = error.GetFailureDefinitionId();
             Guid failureGuid = failureId?.Guid ?? Guid.Empty;
 
-            LogWithTimestamp($"[PROCESSOR] Handling error: {description}");
-            LogWithTimestamp($"[PROCESSOR] Failure GUID: {failureGuid}");
+            LogWithTimestamp($"Processing error: {description}");
+            LogWithTimestamp($"Failure ID: {failureGuid}");
 
-            // Check if this is a known MEP failure
-            if (_mepFailures.ContainsKey(failureGuid))
+            if (failureGuid == new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"))
             {
-                LogWithTimestamp($"[PROCESSOR] Recognized MEP failure: {_mepFailures[failureGuid]}");
-            }
-
-            // For MEP tap attachment errors, we should delete the elements
-            if (failureGuid == new Guid("69f669cb-8551-49cb-b7d2-8213056b9578"))
-            {
-                // This is the "Tap must be attached to duct" error
-                LogWithTimestamp("[PROCESSOR] Attempting to resolve tap attachment error");
-
-                // First check if there's a delete resolution available
-                if (error.HasResolutionOfType(FailureResolutionType.DeleteElements))
+                LogWithTimestamp("Detected dimension reference error - attempting to fix");
+                if (TryResolveOrDelete(failuresAccessor, error))
                 {
-                    try
-                    {
-                        error.SetCurrentResolutionType(FailureResolutionType.DeleteElements);
-                        failuresAccessor.ResolveFailure(error);
-                        ErrorsResolved++;
-                        LogWithTimestamp("[PROCESSOR] Resolved by setting delete resolution");
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        LogError("[PROCESSOR] Failed to set delete resolution", ex);
-                    }
-                }
-
-                // If that didn't work, try to delete the elements directly
-                var failingElements = error.GetFailingElementIds();
-                if (failingElements != null && failingElements.Count > 0)
-                {
-                    try
-                    {
-                        failuresAccessor.DeleteElements(failingElements.ToList());
-                        ElementsDeleted += failingElements.Count;
-                        ErrorsResolved++;
-                        LogWithTimestamp($"[PROCESSOR] Deleted {failingElements.Count} failing tap elements");
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        LogError("[PROCESSOR] Failed to delete tap elements", ex);
-                    }
+                    DimensionErrorsFixed++;
+                    ErrorsResolved++;
                 }
             }
+            else if (failureGuid == new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"))
+            {
+                LogWithTimestamp("Detected network connectivity error - attempting to fix");
+                if (TryResolveOrDelete(failuresAccessor, error))
+                {
+                    NetworkErrorsFixed++;
+                    ErrorsResolved++;
+                }
+            }
+            else if (failureGuid == new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173"))
+            {
+                LogWithTimestamp("Detected 'line too short' error - will delete elements");
+                if (TryDeleteFailingElements(failuresAccessor, error))
+                {
+                    ErrorsResolved++;
+                }
+            }
+            else
+            {
+                LogWithTimestamp("Unknown error type - attempting generic resolution");
+                if (TryResolveOrDelete(failuresAccessor, error))
+                {
+                    ErrorsResolved++;
+                }
+            }
+        }
 
-            // For other errors, try generic resolution
+        private bool TryResolveOrDelete(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
             if (error.HasResolutions())
             {
                 try
                 {
-                    // Try the default resolution
                     failuresAccessor.ResolveFailure(error);
-                    ErrorsResolved++;
-                    LogWithTimestamp("[PROCESSOR] Resolved using default resolution");
+                    LogWithTimestamp("Successfully resolved error using default resolution");
+                    return true;
                 }
                 catch (Exception ex)
                 {
-                    LogError("[PROCESSOR] Failed to resolve error", ex);
-
-                    // As a last resort, try to delete elements
-                    var elements = error.GetFailingElementIds();
-                    if (elements != null && elements.Count > 0)
-                    {
-                        try
-                        {
-                            failuresAccessor.DeleteElements(elements.ToList());
-                            ElementsDeleted += elements.Count;
-                            LogWithTimestamp($"[PROCESSOR] Deleted {elements.Count} elements as last resort");
-                        }
-                        catch (Exception deleteEx)
-                        {
-                            LogError("[PROCESSOR] Failed to delete elements", deleteEx);
-                        }
-                    }
+                    LogError("Failed to resolve error", ex);
                 }
             }
+
+            return TryDeleteFailingElements(failuresAccessor, error);
+        }
+
+        private bool TryDeleteFailingElements(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
+            var failingElements = error.GetFailingElementIds();
+            if (failingElements != null && failingElements.Count > 0)
+            {
+                try
+                {
+                    failuresAccessor.DeleteElements(failingElements.ToList());
+                    ElementsDeleted += failingElements.Count;
+                    LogWithTimestamp($"Deleted {failingElements.Count} failing elements");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Failed to delete {failingElements.Count} elements", ex);
+                }
+            }
+            return false;
         }
 
         public void Dismiss(Document document)
         {
-            LogWithTimestamp("[PROCESSOR] Failure processor dismissed");
+            LogWithTimestamp("Failure processor dismissed");
         }
 
         private static void LogWithTimestamp(string message)
         {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] {message}");
         }
 
         private static void LogError(string message, Exception ex = null)
         {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ERROR: {message}");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] ERROR: {message}");
             if (ex != null)
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception: {ex.Message}");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [FAILURE_PROCESSOR] Exception: {ex.Message}");
             }
         }
     }

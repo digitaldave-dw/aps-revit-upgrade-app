@@ -73,7 +73,9 @@ namespace ADNPlugin.Revit.FileUpgrader
             {
                 LogWithTimestamp("Starting document processing");
 
+                Application rvtApp = data.RevitApp;
                 Document doc = data.RevitDoc;
+
                 if (doc == null)
                 {
                     LogError("Document is null - this should not happen");
@@ -85,6 +87,10 @@ namespace ADNPlugin.Revit.FileUpgrader
                 LogWithTimestamp($"Is Modified: {doc.IsModified}");
                 LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
                 LogWithTimestamp($"Is Detached: {doc.IsDetached}");
+
+                // Note: Design Automation automatically opens workshared files as detached
+                // (notice the _detached suffix in the document title)
+                // We just need to save with proper worksharing options
 
                 if (_failureProcessor.HasCriticalErrors)
                 {
@@ -98,25 +104,28 @@ namespace ADNPlugin.Revit.FileUpgrader
                 string outputPath = "revitupgrade.rvt";
                 LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
 
-                ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
+                ModelPath outputModelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
 
                 SaveAsOptions saveOptions = new SaveAsOptions();
                 saveOptions.OverwriteExistingFile = true;
-                saveOptions.Compact = false; 
-                saveOptions.MaximumBackups = 1; 
+                saveOptions.Compact = false;
+                saveOptions.MaximumBackups = 1;
 
+                // CRITICAL: For workshared documents (including detached ones),
+                // you MUST use WorksharingSaveAsOptions with SaveAsCentral = true
+                // This is required by Revit API for any workshared document
                 if (doc.IsWorkshared)
                 {
-                    LogWithTimestamp("Document is workshared - configuring worksharing save options");
+                    LogWithTimestamp("Document is workshared - configuring worksharing save options with SaveAsCentral=true");
                     WorksharingSaveAsOptions wsOptions = new WorksharingSaveAsOptions();
-                    wsOptions.SaveAsCentral = true;
+                    wsOptions.SaveAsCentral = true;  // REQUIRED for workshared/detached documents
                     wsOptions.OpenWorksetsDefault = SimpleWorksetConfiguration.AllWorksets;
                     saveOptions.SetWorksharingOptions(wsOptions);
                 }
 
                 LogWithTimestamp("Saving upgraded file...");
                 var saveStart = DateTime.Now;
-                doc.SaveAs(modelPath, saveOptions);
+                doc.SaveAs(outputModelPath, saveOptions);
                 var saveTime = (DateTime.Now - saveStart).TotalSeconds;
                 LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
 
