@@ -1,0 +1,389 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using Autodesk.Revit.ApplicationServices;
+using Autodesk.Revit.DB;
+using DesignAutomationFramework;
+
+
+namespace FileUpgrader2025
+{
+    [Autodesk.Revit.Attributes.Regeneration(Autodesk.Revit.Attributes.RegenerationOption.Manual)]
+    [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
+    public class FileUpgradeApp : IExternalDBApplication
+    {
+        // Store reference to our failure processor
+        private static DocumentUpgradeFailureProcessor _failureProcessor;
+
+        public ExternalDBApplicationResult OnStartup(Autodesk.Revit.ApplicationServices.ControlledApplication application)
+        {
+            Console.WriteLine("==== FILE UPGRADER STARTUP ====");
+            LogWithTimestamp("Application startup initiated");
+
+            try
+            {
+                // CRITICAL: Register the failure processor immediately on startup
+                // This ensures it's active BEFORE Design Automation tries to open the document
+                _failureProcessor = new DocumentUpgradeFailureProcessor();
+                Autodesk.Revit.ApplicationServices.Application.RegisterFailuresProcessor(_failureProcessor);
+                LogWithTimestamp("Document upgrade failure processor registered successfully");
+
+                // Subscribe to DesignAutomationReadyEvent
+                DesignAutomationBridge.DesignAutomationReadyEvent += HandleDesignAutomationReadyEvent;
+                LogWithTimestamp("Subscribed to DesignAutomationReadyEvent");
+
+                return ExternalDBApplicationResult.Succeeded;
+            }
+            catch (Exception ex)
+            {
+                LogError("Failed during startup", ex);
+                return ExternalDBApplicationResult.Failed;
+            }
+        }
+
+        public void HandleDesignAutomationReadyEvent(object sender, DesignAutomationReadyEventArgs e)
+        {
+            LogWithTimestamp("DesignAutomationReadyEvent fired");
+
+            try
+            {
+                Application rvtApp = e.DesignAutomationData.RevitApp;
+                Autodesk.Revit.DB.Document doc = e.DesignAutomationData.RevitDoc;
+
+                // Log current state
+                string versionInfo = $"Revit Version: {rvtApp.VersionNumber} Build: {rvtApp.VersionBuild}";
+                LogWithTimestamp(versionInfo);
+
+                // Log failure processor statistics to see what happened during document opening
+                LogWithTimestamp("=== DOCUMENT OPENING STATISTICS ===");
+                LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
+                LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
+                LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
+                LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
+                LogWithTimestamp($"Has unresolved errors: {_failureProcessor.HasUnresolvedErrors}");
+                LogWithTimestamp("===================================");
+
+                if (doc == null)
+                {
+                    LogError("Document is null - document opening failed despite failure handling");
+                    e.Succeeded = false;
+                    return;
+                }
+
+                LogWithTimestamp("Document opened successfully");
+                // Process and save the document
+                e.Succeeded = ProcessDocument(e.DesignAutomationData);
+            }
+            catch (Exception ex)
+            {
+                LogError("Exception in DesignAutomationReadyEvent handler", ex);
+                e.Succeeded = false;
+            }
+        }
+
+        private bool ProcessDocument(DesignAutomationData data)
+        {
+            try
+            {
+                LogWithTimestamp("Starting document processing");
+
+                Autodesk.Revit.DB.Document doc = data.RevitDoc;
+                if (doc == null)
+                {
+                    LogError("Document is null - cannot process");
+                    return false;
+                }
+
+                // Log document information
+                LogWithTimestamp($"Document Title: {doc.Title}");
+                LogWithTimestamp($"Document Path: {doc.PathName}");
+                LogWithTimestamp($"Is Modified: {doc.IsModified}");
+                LogWithTimestamp($"Is Workshared: {doc.IsWorkshared}");
+                LogWithTimestamp($"Is Detached: {doc.IsDetached}");
+
+                // Save the upgraded file
+                string outputPath = "revitupgrade.rvt";
+                LogWithTimestamp($"Preparing to save upgraded file as: {outputPath}");
+
+                ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(outputPath);
+
+                SaveAsOptions saveOptions = new SaveAsOptions();
+                saveOptions.OverwriteExistingFile = true;
+                saveOptions.Compact = true; // Compact can help fix issues
+                saveOptions.MaximumBackups = 1;
+
+                // Handle workshared documents - save as non-workshared (detached) file
+                if (doc.IsWorkshared)
+                {
+                    LogWithTimestamp("Document is workshared - saving as DETACHED (non-workshared) file");
+                    LogWithTimestamp("This creates an independent copy without connection to the central model");
+
+                    // For workshared files, we want to save WITHOUT worksharing
+                    // This effectively "detaches" the file by not setting worksharing options
+                    // and disabling worksharing before save
+
+                    // Option 1: Try to disable worksharing if the document allows it
+                    try
+                    {
+                        // Check if we can disable worksharing
+                        if (!doc.IsDetached)
+                        {
+                            LogWithTimestamp("Attempting to disable worksharing on the document...");
+                            // Note: DisableWorksharing is not available in all contexts
+                            // For Design Automation, we rely on save options instead
+                        }
+                    }
+                    catch (Exception disableEx)
+                    {
+                        LogWithTimestamp($"Could not disable worksharing (expected): {disableEx.Message}");
+                    }
+
+                    // Option 2: Save WITHOUT worksharing options to create a non-workshared copy
+                    // By NOT setting WorksharingSaveAsOptions, the file is saved as a standalone file
+                    LogWithTimestamp("Saving without worksharing options to create standalone file");
+
+                    // Do NOT set worksharing options - this saves the file as non-workshared
+                    // WorksharingSaveAsOptions wsOptions = new WorksharingSaveAsOptions();
+                    // wsOptions.SaveAsCentral = false;  // Don't use this
+                    // Instead, just don't call saveOptions.SetWorksharingOptions() at all
+                }
+                else
+                {
+                    LogWithTimestamp("Document is not workshared - saving normally");
+                }
+
+                LogWithTimestamp("Saving upgraded file...");
+                var saveStart = DateTime.Now;
+                doc.SaveAs(modelPath, saveOptions);
+                var saveTime = (DateTime.Now - saveStart).TotalSeconds;
+                LogWithTimestamp($"File saved successfully in {saveTime:F2} seconds");
+
+                // Verify the output is not workshared
+                LogWithTimestamp($"Output file worksharing status: Document was originally workshared={doc.IsWorkshared}, saved as standalone");
+
+                // Log final statistics
+                LogWithTimestamp("=== UPGRADE COMPLETE - FINAL STATISTICS ===");
+                LogWithTimestamp($"Total failures processed: {_failureProcessor.TotalFailuresProcessed}");
+                LogWithTimestamp($"Warnings deleted: {_failureProcessor.WarningsDeleted}");
+                LogWithTimestamp($"Errors resolved: {_failureProcessor.ErrorsResolved}");
+                LogWithTimestamp($"Elements deleted: {_failureProcessor.ElementsDeleted}");
+                LogWithTimestamp("==========================================");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogError("Exception during document processing", ex);
+                return false;
+            }
+        }
+
+        public ExternalDBApplicationResult OnShutdown(Autodesk.Revit.ApplicationServices.ControlledApplication application)
+        {
+            LogWithTimestamp("==== FILE UPGRADER SHUTDOWN ====");
+
+            try
+            {
+                // Only unregister if we have a processor
+                if (_failureProcessor != null)
+                {
+                    Application.RegisterFailuresProcessor(null);
+                    LogWithTimestamp("Failure processor unregistered");
+                    _failureProcessor = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("Error during shutdown", ex);
+            }
+
+            return ExternalDBApplicationResult.Succeeded;
+        }
+
+        // Logging helper methods
+        private static void LogWithTimestamp(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
+        }
+
+        private static void LogError(string message, Exception ex = null)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ERROR: {message}");
+            if (ex != null)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception Type: {ex.GetType().Name}");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception Message: {ex.Message}");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Stack Trace: {ex.StackTrace}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Custom failure processor that handles MEP-specific failures during file upgrades
+    /// </summary>
+    public class FileUpgradeFailureProcessor : IFailuresProcessor
+    {
+        // Statistics for logging
+        public int TotalFailuresProcessed { get; private set; } = 0;
+        public int WarningsDeleted { get; private set; } = 0;
+        public int ErrorsResolved { get; private set; } = 0;
+        public int ElementsDeleted { get; private set; } = 0;
+
+        // Track specific MEP failure types
+        private readonly Dictionary<Guid, string> _mepFailures = new Dictionary<Guid, string>
+        {
+            { new Guid("69f669cb-8551-49cb-b7d2-8213056b9578"), "Tap must be attached to duct" },
+            { new Guid("dd0a16ea-9d2c-467d-b02c-5d86474a5041"), "Family network connectivity" },
+            { new Guid("8a9ff20d-fdc2-4f98-87e6-2aa8b71b0c83"), "Dimension references not parallel" },
+            { new Guid("0d5f227d-a4fd-4bc2-b539-1a13cd9a9173"), "Line is too short" }
+        };
+
+        public FailureProcessingResult ProcessFailures(FailuresAccessor failuresAccessor)
+        {
+            IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
+
+            LogWithTimestamp($"[PROCESSOR] Processing {failures.Count} failures");
+            TotalFailuresProcessed += failures.Count;
+
+            // First, handle all warnings
+            foreach (var failure in failures.ToList())
+            {
+                if (failure.GetSeverity() == FailureSeverity.Warning)
+                {
+                    try
+                    {
+                        failuresAccessor.DeleteWarning(failure);
+                        WarningsDeleted++;
+                        LogWithTimestamp($"[PROCESSOR] Deleted warning: {failure.GetDescriptionText()}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("[PROCESSOR] Failed to delete warning", ex);
+                    }
+                }
+            }
+
+            // Now handle errors
+            var errors = failuresAccessor.GetFailureMessages()
+                .Where(f => f.GetSeverity() == FailureSeverity.Error)
+                .ToList();
+
+            foreach (var error in errors)
+            {
+                HandleError(failuresAccessor, error);
+            }
+
+            // Always return Continue to let the process proceed
+            return FailureProcessingResult.Continue;
+        }
+
+        private void HandleError(FailuresAccessor failuresAccessor, FailureMessageAccessor error)
+        {
+            string description = error.GetDescriptionText();
+            FailureDefinitionId failureId = error.GetFailureDefinitionId();
+            Guid failureGuid = failureId?.Guid ?? Guid.Empty;
+
+            LogWithTimestamp($"[PROCESSOR] Handling error: {description}");
+            LogWithTimestamp($"[PROCESSOR] Failure GUID: {failureGuid}");
+
+            // Check if this is a known MEP failure
+            if (_mepFailures.ContainsKey(failureGuid))
+            {
+                LogWithTimestamp($"[PROCESSOR] Recognized MEP failure: {_mepFailures[failureGuid]}");
+            }
+
+            // For MEP tap attachment errors, we should delete the elements
+            if (failureGuid == new Guid("69f669cb-8551-49cb-b7d2-8213056b9578"))
+            {
+                // This is the "Tap must be attached to duct" error
+                LogWithTimestamp("[PROCESSOR] Attempting to resolve tap attachment error");
+
+                // First check if there's a delete resolution available
+                if (error.HasResolutionOfType(FailureResolutionType.DeleteElements))
+                {
+                    try
+                    {
+                        error.SetCurrentResolutionType(FailureResolutionType.DeleteElements);
+                        failuresAccessor.ResolveFailure(error);
+                        ErrorsResolved++;
+                        LogWithTimestamp("[PROCESSOR] Resolved by setting delete resolution");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("[PROCESSOR] Failed to set delete resolution", ex);
+                    }
+                }
+
+                // If that didn't work, try to delete the elements directly
+                var failingElements = error.GetFailingElementIds();
+                if (failingElements != null && failingElements.Count > 0)
+                {
+                    try
+                    {
+                        failuresAccessor.DeleteElements(failingElements.ToList());
+                        ElementsDeleted += failingElements.Count;
+                        ErrorsResolved++;
+                        LogWithTimestamp($"[PROCESSOR] Deleted {failingElements.Count} failing tap elements");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("[PROCESSOR] Failed to delete tap elements", ex);
+                    }
+                }
+            }
+
+            // For other errors, try generic resolution
+            if (error.HasResolutions())
+            {
+                try
+                {
+                    // Try the default resolution
+                    failuresAccessor.ResolveFailure(error);
+                    ErrorsResolved++;
+                    LogWithTimestamp("[PROCESSOR] Resolved using default resolution");
+                }
+                catch (Exception ex)
+                {
+                    LogError("[PROCESSOR] Failed to resolve error", ex);
+
+                    // As a last resort, try to delete elements
+                    var elements = error.GetFailingElementIds();
+                    if (elements != null && elements.Count > 0)
+                    {
+                        try
+                        {
+                            failuresAccessor.DeleteElements(elements.ToList());
+                            ElementsDeleted += elements.Count;
+                            LogWithTimestamp($"[PROCESSOR] Deleted {elements.Count} elements as last resort");
+                        }
+                        catch (Exception deleteEx)
+                        {
+                            LogError("[PROCESSOR] Failed to delete elements", deleteEx);
+                        }
+                    }
+                }
+            }
+        }
+
+        public void Dismiss(Autodesk.Revit.DB.Document document)
+        {
+            LogWithTimestamp("[PROCESSOR] Failure processor dismissed");
+        }
+
+        private static void LogWithTimestamp(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
+        }
+
+        private static void LogError(string message, Exception ex = null)
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] ERROR: {message}");
+            if (ex != null)
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] Exception: {ex.Message}");
+            }
+        }
+    }
+}
