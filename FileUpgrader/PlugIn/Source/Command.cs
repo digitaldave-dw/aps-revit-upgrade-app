@@ -75,11 +75,48 @@ namespace ADNPlugin.Revit.FileUpgrader
 
                 Application rvtApp = data.RevitApp;
                 Document doc = data.RevitDoc;
+                string inputFilePath = data.FilePath;
 
+                // If document failed to open (e.g., corruption), try opening with Audit
                 if (doc == null)
                 {
-                    LogError("Document is null - this should not happen");
-                    return false;
+                    LogWithTimestamp("Document is null - attempting to open with Audit option for recovery");
+
+                    if (string.IsNullOrEmpty(inputFilePath))
+                    {
+                        LogError("No file path available for audit recovery");
+                        return false;
+                    }
+
+                    try
+                    {
+                        LogWithTimestamp($"Attempting audit recovery for: {inputFilePath}");
+
+                        ModelPath modelPath = ModelPathUtils.ConvertUserVisiblePathToModelPath(inputFilePath);
+                        OpenOptions openOptions = new OpenOptions();
+                        openOptions.Audit = true;  // Enable audit to repair corruption
+                        openOptions.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets;
+
+                        // Set up workset configuration
+                        WorksetConfiguration worksetConfig = new WorksetConfiguration(WorksetConfigurationOption.OpenAllWorksets);
+                        openOptions.SetOpenWorksetsConfiguration(worksetConfig);
+
+                        LogWithTimestamp("Opening file with Audit=true...");
+                        doc = rvtApp.OpenDocumentFile(modelPath, openOptions);
+
+                        if (doc == null)
+                        {
+                            LogError("Audit recovery failed - document still null");
+                            return false;
+                        }
+
+                        LogWithTimestamp("Audit recovery successful - document opened");
+                    }
+                    catch (Exception auditEx)
+                    {
+                        LogError("Audit recovery failed with exception", auditEx);
+                        return false;
+                    }
                 }
 
                 LogWithTimestamp($"Document Title: {doc.Title}");
