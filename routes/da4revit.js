@@ -1203,69 +1203,68 @@ router.post('/callback/designautomation', async (req, res, next) => {
             try {
                 // Handle bulk processing workitem
                 if (bulkWorkitemInfo) {
-                    const { bulkJob, file } = bulkWorkitemInfo;
-                    
+                    const { bulkJob, file, createVersionData, projectId, oauth_client, oauth_token } = bulkWorkitemInfo;
+
                     console.log(`Processing bulk workitem callback for file: ${file.fileItemName}`);
-                    
-                    // Get the stored version creation data
-                    const workitemData = workitemTracker.getWorkitem(req.body.id);
-                    if (!workitemData || !workitemData.createVersionData) {
+
+                    // Use data from bulkWorkitemInfo (stored when workitem was submitted)
+                    if (!createVersionData) {
                         console.error('Missing version creation data for bulk workitem');
                         workitemStatus.Status = 'Failed';
                         workitemStatus.Error = 'Missing version creation data';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-                        
+
                         // Update tracker and bulk queue
                         workitemTracker.failWorkitem(req.body.id, 'Missing version data');
                         bulkQueue.handleFileFailed(file, bulkJob, new Error('Missing version data'));
                         return;
                     }
-                    
-                    // Get credentials from bulk job options
-                    const credentials = bulkJob.options.oauth_token;
-                    const oauth_client = bulkJob.options.oauth_client;
-                    
+
+                    // Get credentials from bulkWorkitemInfo (stored when workitem was submitted)
+                    const credentials = oauth_token || bulkJob.options.oauth_token;
+                    const oauthClient = oauth_client || bulkJob.options.oauth_client;
+
                     if (!credentials || !credentials.access_token) {
                         console.log("No valid token available for bulk processing operation");
                         workitemStatus.Status = 'Failed';
                         workitemStatus.Error = 'Authentication error - missing token';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
-                        
+
                         // Update tracker and bulk queue
                         workitemTracker.failWorkitem(req.body.id, 'Authentication error');
                         bulkQueue.handleFileFailed(file, bulkJob, new Error('Authentication error'));
                         return;
                     }
-                    
+
                     // CRITICAL: Actually create the version in BIM360/ACC
                     console.log("Creating new version in BIM360/ACC for bulk processed file");
-                    console.log(`Project ID: ${workitemData.projectId}`);
-                    console.log(`Version data type: ${workitemData.createVersionData.data.type}`);
-                    
+                    console.log(`Project ID: ${projectId}`);
+                    console.log(`Version data type: ${createVersionData.data.type}`);
+
                     let version = null;
                     let retries = 3;
                     let lastError = null;
-                    
+
                     while (retries > 0 && !version) {
                         try {
-                            if (workitemData.createVersionData.data.type === 'versions') {
+                            if (createVersionData.data.type === 'versions') {
                                 const versions = new VersionsApi();
                                 version = await versions.postVersion(
-                                    workitemData.projectId, 
-                                    workitemData.createVersionData, 
-                                    oauth_client, 
+                                    projectId,
+                                    createVersionData,
+                                    oauthClient,
                                     credentials
                                 );
                             } else {
                                 const items = new ItemsApi();
                                 version = await items.postItem(
-                                    workitemData.projectId, 
-                                    workitemData.createVersionData, 
-                                    oauth_client, 
+                                    projectId,
+                                    createVersionData,
+                                    oauthClient,
                                     credentials
                                 );
                             }
-                            
+
                             if (version && version.statusCode === 201) {
                                 console.log(`Successfully created version for ${file.fileItemName}`);
                                 break; // Success
@@ -1273,14 +1272,14 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         } catch (err) {
                             lastError = err;
                             retries--;
-                            
+
                             if (retries > 0) {
                                 console.log(`Retry ${3 - retries}/3 after error:`, err.message);
                                 await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
                             }
                         }
                     }
-                    
+
                     if (version && version.statusCode === 201) {
                         console.log('Successfully created a new version of the file');
                         workitemStatus.Status = 'Completed';
