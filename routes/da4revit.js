@@ -561,16 +561,29 @@ router.use(async (req, res, next) => {
 /// This endpoint remains mostly the same but ensures targetVersion is passed
 ///////////////////////////////////////////////////////////////////////
 router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
-    const { 
-        folderId, 
-        projectId, 
+    const {
+        folderId,
+        projectId,
         targetVersion = "2023",
-        supportedTypes = ['rvt', 'rfa', 'rte'] 
+        supportedTypes = ['rvt', 'rfa', 'rte'],
+        destinationFolderId,      // Optional: if provided, copy to this folder
+        destinationProjectId      // Optional: if provided, copy to this project
     } = req.body;
 
     // Validate inputs
     if (!folderId || !projectId) {
         return res.status(400).json({ error: 'folderId and projectId are required' });
+    }
+
+    // Determine if this is in-place upgrade or cross-folder/project copy
+    const targetProjectId = destinationProjectId || projectId;
+    const targetFolderId = destinationFolderId || folderId;
+    const isInPlaceUpgrade = (targetProjectId === projectId) && (targetFolderId === folderId);
+
+    console.log(`Bulk upgrade mode: ${isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-FOLDER/PROJECT'}`);
+    if (!isInPlaceUpgrade) {
+        console.log(`   Source: project=${projectId}, folder=${folderId}`);
+        console.log(`   Destination: project=${targetProjectId}, folder=${targetFolderId}`);
     }
 
     // Validate target version
@@ -652,10 +665,11 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     projectId: projectId,
                     itemId: item.id,
                     extensionType: item.attributes.extension?.type || 'unknown',
-                    // Add required properties for submitToDesignAutomation
-                    isInPlaceUpgrade: true,
+                    // FIXED: Use computed values for destination support
+                    isInPlaceUpgrade: isInPlaceUpgrade,
                     sourceProjectId: projectId,
-                    destinationProjectId: projectId,
+                    destinationProjectId: targetProjectId,
+                    destinationFolderId: targetFolderId,
                     shouldDetach: isWorkshared  // Detach workshared files during upgrade
                 });
 
