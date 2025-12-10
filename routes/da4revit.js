@@ -356,7 +356,7 @@ class BulkProcessingQueue {
                 global.bulkJobWorkitems = new Map();
             }
             
-            // Store workitem data including upgrade mode
+            // Store workitem data including upgrade mode and session for token refresh
             global.bulkJobWorkitems.set(upgradeRes.body.id, {
                 bulkJob: this.queue[0],
                 file: file,
@@ -365,6 +365,7 @@ class BulkProcessingQueue {
                 projectId: targetProjectId,
                 oauth_client: options.oauth_client,
                 oauth_token: options.oauth_token,
+                session: options.session,  // Store session for token refresh in callback
                 targetVersion: options.targetVersion,
                 isInPlaceUpgrade: file.isInPlaceUpgrade,
                 operationType: createPayload.data.type
@@ -705,11 +706,13 @@ ${JSON.stringify(versionDetector.getStats(), null, 2)}
         const oauth_token_2legged = await oauth_client_2legged.authenticate();
 
         // Add to processing queue - only files that actually need upgrade
+        // CRITICAL: Store the session so we can refresh tokens when callback comes
         const batchId = bulkQueue.addBulkJob(filesToUpgrade, {
             targetVersion,
             oauth_client: req.oauth_client,
             oauth_token: req.oauth_token,
-            oauth_token_2legged
+            oauth_token_2legged,
+            session: req.session  // Store session for token refresh in callback
         });
 
         console.log(`✅ Bulk job created: ${batchId} for ${filesToUpgrade.length} files`);
@@ -1203,7 +1206,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
             try {
                 // Handle bulk processing workitem
                 if (bulkWorkitemInfo) {
-                    const { bulkJob, file, createVersionData, projectId, oauth_client, oauth_token } = bulkWorkitemInfo;
+                    const { bulkJob, file, createVersionData, projectId, session } = bulkWorkitemInfo;
 
                     console.log(`Processing bulk workitem callback for file: ${file.fileItemName}`);
 
@@ -1220,21 +1223,37 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         return;
                     }
 
-                    // Get credentials from bulkWorkitemInfo (stored when workitem was submitted)
-                    const credentials = oauth_token || bulkJob.options.oauth_token;
-                    const oauthClient = oauth_client || bulkJob.options.oauth_client;
+                    // CRITICAL: Get fresh tokens using the stored session
+                    // Tokens may have expired during the DA processing (can take 10+ minutes)
+                    const storedSession = session || bulkJob.options.session;
+                    if (!storedSession) {
+                        console.error("No session available for token refresh");
+                        workitemStatus.Status = 'Failed';
+                        workitemStatus.Error = 'Authentication error - no session';
+                        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        workitemTracker.failWorkitem(req.body.id, 'No session for token refresh');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('No session for token refresh'));
+                        return;
+                    }
+
+                    // Use OAuth class to get fresh/refreshed tokens
+                    const oauth = new OAuth(storedSession);
+                    const oauthClient = oauth.getClient();
+                    const credentials = await oauth.getInternalToken();
 
                     if (!credentials || !credentials.access_token) {
-                        console.log("No valid token available for bulk processing operation");
+                        console.log("Failed to get valid token for bulk processing operation");
                         workitemStatus.Status = 'Failed';
-                        workitemStatus.Error = 'Authentication error - missing token';
+                        workitemStatus.Error = 'Authentication error - token refresh failed';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
 
                         // Update tracker and bulk queue
-                        workitemTracker.failWorkitem(req.body.id, 'Authentication error');
-                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Authentication error'));
+                        workitemTracker.failWorkitem(req.body.id, 'Token refresh failed');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Token refresh failed'));
                         return;
                     }
+
+                    console.log("Got fresh token for BIM360/ACC operation");
 
                     // CRITICAL: Actually create the version in BIM360/ACC
                     console.log("Creating new version in BIM360/ACC for bulk processed file");
