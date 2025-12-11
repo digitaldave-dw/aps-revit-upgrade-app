@@ -377,10 +377,19 @@ function createAnalysisPanel(stats, targetVersion, timeElapsed) {
 async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
   try {
     bulkProcessingActive = true;
-    
+
+    // Parse source folder information
     const sourceParams = sourceNode.id.split('/');
     const sourceFolderId = sourceParams[sourceParams.length - 1];
-    const projectId = sourceParams[sourceParams.length - 3];
+    const sourceProjectId = sourceParams[sourceParams.length - 3];
+
+    // Parse destination folder information
+    const destParams = destinationNode.id.split('/');
+    const destFolderId = destParams[destParams.length - 1];
+    const destProjectId = destParams[destParams.length - 3];
+
+    // Determine if this is in-place upgrade or cross-folder copy
+    const isInPlaceUpgrade = (sourceProjectId === destProjectId) && (sourceFolderId === destFolderId);
 
     const supportedTypes = [];
     if (bSupportRvt) supportedTypes.push('rvt');
@@ -388,39 +397,44 @@ async function startBulkProcessing(sourceNode, destinationNode, targetVersion) {
     if (bSupportRte) supportedTypes.push('rte');
 
     console.log('Starting optimized bulk processing:', {
-      projectId: projectId,
-      folderId: sourceFolderId,
+      sourceProjectId: sourceProjectId,
+      sourceFolderId: sourceFolderId,
+      destProjectId: destProjectId,
+      destFolderId: destFolderId,
+      isInPlaceUpgrade: isInPlaceUpgrade,
       targetVersion: targetVersion,
       supportedTypes: supportedTypes
     });
 
     const logList = document.getElementById('logStatus');
     logList.innerHTML = '';
-    
+
     // Show analyzing status
     addGroupListItem(
-      'Bulk Processing', 
-      'Analyzing folder and detecting file versions...', 
-      ItemType.FOLDER, 
+      'Bulk Processing',
+      `${isInPlaceUpgrade ? 'In-place upgrade' : 'Cross-folder copy'} - Analyzing folder and detecting file versions...`,
+      ItemType.FOLDER,
       'list-group-item-info',
       null,
       'bulk-analysis'
     );
 
-    document.getElementById('upgradeTitle').innerHTML = 
+    document.getElementById('upgradeTitle').innerHTML =
       '<h4>🔍 Analyzing Files and Detecting Versions...</h4>';
 
     const startTime = Date.now();
 
-    // Start bulk processing
+    // Start bulk processing with destination folder information
     const response = await jQuery.ajax({
       url: '/api/aps/da4revit/v1/upgrader/bulk',
       method: 'POST',
       contentType: 'application/json',
       dataType: 'json',
       data: JSON.stringify({
-        projectId: projectId,
+        projectId: sourceProjectId,
         folderId: sourceFolderId,
+        destinationProjectId: destProjectId,
+        destinationFolderId: destFolderId,
         targetVersion: targetVersion,
         supportedTypes: supportedTypes
       })

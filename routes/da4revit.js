@@ -178,23 +178,16 @@ class BulkProcessingQueue {
             
             // Submit to Design Automation
             const result = await this.submitToDesignAutomation(file, bulkJob.options);
-            
+
             if (result.success) {
                 // File submitted successfully - it will complete via webhook
                 file.workItemId = result.workItemId;
                 file.status = 'submitted';
                 bulkJob.submittedFiles++;
-                
-                // Store workitem info for webhook callback
-                if (!global.bulkJobWorkitems) {
-                    global.bulkJobWorkitems = new Map();
-                }
-                global.bulkJobWorkitems.set(result.workItemId, {
-                    bulkJob,
-                    file,
-                    processingKey
-                });
-                
+
+                // Note: bulkJobWorkitems is already set inside submitToDesignAutomation
+                // with all the necessary data (createVersionData, projectId, session, etc.)
+
                 console.log(`File submitted to DA: ${file.fileItemName}, workitem: ${result.workItemId}`);
             } else {
                 throw new Error(result.error || 'Failed to submit to DA');
@@ -318,12 +311,20 @@ class BulkProcessingQueue {
             } else {
                 // For cross-project upgrades, create a new item
                 console.log('   Creating item payload for cross-project upgrade');
+
+                // CRITICAL: Item extension type must use "items:" prefix, not "versions:"
+                // versionType is like "versions:autodesk.bim360:File"
+                // itemType must be "items:autodesk.bim360:File"
+                const itemType = versionInfo.versionType.replace('versions:', 'items:');
+                console.log(`   Item type: ${itemType}`);
+                console.log(`   Version type: ${versionInfo.versionType}`);
+
                 createPayload = createBodyOfPostItem(
                     file.fileItemName,
                     file.destinationFolderId,
                     storageInfo.StorageId,
-                    versionInfo.versionType,
-                    versionInfo.versionType
+                    itemType,                    // items:autodesk.bim360:File
+                    versionInfo.versionType      // versions:autodesk.bim360:File
                 );
                 // Ensure it's an item creation
                 createPayload.data.type = "items";
@@ -356,7 +357,7 @@ class BulkProcessingQueue {
                 global.bulkJobWorkitems = new Map();
             }
             
-            // Store workitem data including upgrade mode
+            // Store workitem data including upgrade mode and session for token refresh
             global.bulkJobWorkitems.set(upgradeRes.body.id, {
                 bulkJob: this.queue[0],
                 file: file,
@@ -365,6 +366,7 @@ class BulkProcessingQueue {
                 projectId: targetProjectId,
                 oauth_client: options.oauth_client,
                 oauth_token: options.oauth_token,
+                session: options.session,  // Store session for token refresh in callback
                 targetVersion: options.targetVersion,
                 isInPlaceUpgrade: file.isInPlaceUpgrade,
                 operationType: createPayload.data.type
@@ -567,16 +569,29 @@ router.use(async (req, res, next) => {
 /// This endpoint remains mostly the same but ensures targetVersion is passed
 ///////////////////////////////////////////////////////////////////////
 router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
-    const { 
-        folderId, 
-        projectId, 
+    const {
+        folderId,
+        projectId,
         targetVersion = "2023",
-        supportedTypes = ['rvt', 'rfa', 'rte'] 
+        supportedTypes = ['rvt', 'rfa', 'rte'],
+        destinationFolderId,      // Optional: if provided, copy to this folder
+        destinationProjectId      // Optional: if provided, copy to this project
     } = req.body;
 
     // Validate inputs
     if (!folderId || !projectId) {
         return res.status(400).json({ error: 'folderId and projectId are required' });
+    }
+
+    // Determine if this is in-place upgrade or cross-folder/project copy
+    const targetProjectId = destinationProjectId || projectId;
+    const targetFolderId = destinationFolderId || folderId;
+    const isInPlaceUpgrade = (targetProjectId === projectId) && (targetFolderId === folderId);
+
+    console.log(`Bulk upgrade mode: ${isInPlaceUpgrade ? 'IN-PLACE' : 'CROSS-FOLDER/PROJECT'}`);
+    if (!isInPlaceUpgrade) {
+        console.log(`   Source: project=${projectId}, folder=${folderId}`);
+        console.log(`   Destination: project=${targetProjectId}, folder=${targetFolderId}`);
     }
 
     // Validate target version
@@ -658,10 +673,11 @@ router.post('/da4revit/v1/upgrader/bulk', async (req, res, next) => {
                     projectId: projectId,
                     itemId: item.id,
                     extensionType: item.attributes.extension?.type || 'unknown',
-                    // Add required properties for submitToDesignAutomation
-                    isInPlaceUpgrade: true,
+                    // FIXED: Use computed values for destination support
+                    isInPlaceUpgrade: isInPlaceUpgrade,
                     sourceProjectId: projectId,
-                    destinationProjectId: projectId,
+                    destinationProjectId: targetProjectId,
+                    destinationFolderId: targetFolderId,
                     shouldDetach: isWorkshared  // Detach workshared files during upgrade
                 });
 
@@ -705,11 +721,13 @@ ${JSON.stringify(versionDetector.getStats(), null, 2)}
         const oauth_token_2legged = await oauth_client_2legged.authenticate();
 
         // Add to processing queue - only files that actually need upgrade
+        // CRITICAL: Store the session so we can refresh tokens when callback comes
         const batchId = bulkQueue.addBulkJob(filesToUpgrade, {
             targetVersion,
             oauth_client: req.oauth_client,
             oauth_token: req.oauth_token,
-            oauth_token_2legged
+            oauth_token_2legged,
+            session: req.session  // Store session for token refresh in callback
         });
 
         console.log(`✅ Bulk job created: ${batchId} for ${filesToUpgrade.length} files`);
@@ -1203,7 +1221,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
             try {
                 // Handle bulk processing workitem
                 if (bulkWorkitemInfo) {
-                    const { bulkJob, file, createVersionData, projectId, oauth_client, oauth_token } = bulkWorkitemInfo;
+                    const { bulkJob, file, createVersionData, projectId, session } = bulkWorkitemInfo;
 
                     console.log(`Processing bulk workitem callback for file: ${file.fileItemName}`);
 
@@ -1220,26 +1238,44 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         return;
                     }
 
-                    // Get credentials from bulkWorkitemInfo (stored when workitem was submitted)
-                    const credentials = oauth_token || bulkJob.options.oauth_token;
-                    const oauthClient = oauth_client || bulkJob.options.oauth_client;
+                    // CRITICAL: Get fresh tokens using the stored session
+                    // Tokens may have expired during the DA processing (can take 10+ minutes)
+                    const storedSession = session || bulkJob.options.session;
+                    if (!storedSession) {
+                        console.error("No session available for token refresh");
+                        workitemStatus.Status = 'Failed';
+                        workitemStatus.Error = 'Authentication error - no session';
+                        global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
+                        workitemTracker.failWorkitem(req.body.id, 'No session for token refresh');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('No session for token refresh'));
+                        return;
+                    }
+
+                    // Use OAuth class to get fresh/refreshed tokens
+                    const oauth = new OAuth(storedSession);
+                    const oauthClient = oauth.getClient();
+                    const credentials = await oauth.getInternalToken();
 
                     if (!credentials || !credentials.access_token) {
-                        console.log("No valid token available for bulk processing operation");
+                        console.log("Failed to get valid token for bulk processing operation");
                         workitemStatus.Status = 'Failed';
-                        workitemStatus.Error = 'Authentication error - missing token';
+                        workitemStatus.Error = 'Authentication error - token refresh failed';
                         global.MyApp.SocketIo.emit(SOCKET_TOPIC_WORKITEM, workitemStatus);
 
                         // Update tracker and bulk queue
-                        workitemTracker.failWorkitem(req.body.id, 'Authentication error');
-                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Authentication error'));
+                        workitemTracker.failWorkitem(req.body.id, 'Token refresh failed');
+                        bulkQueue.handleFileFailed(file, bulkJob, new Error('Token refresh failed'));
                         return;
                     }
+
+                    console.log("Got fresh token for BIM360/ACC operation");
 
                     // CRITICAL: Actually create the version in BIM360/ACC
                     console.log("Creating new version in BIM360/ACC for bulk processed file");
                     console.log(`Project ID: ${projectId}`);
                     console.log(`Version data type: ${createVersionData.data.type}`);
+                    console.log(`Is in-place upgrade: ${bulkWorkitemInfo.isInPlaceUpgrade}`);
+                    console.log(`Create payload:`, JSON.stringify(createVersionData, null, 2));
 
                     let version = null;
                     let retries = 3;
@@ -1249,6 +1285,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         try {
                             if (createVersionData.data.type === 'versions') {
                                 const versions = new VersionsApi();
+                                console.log(`Calling postVersion for project ${projectId}`);
                                 version = await versions.postVersion(
                                     projectId,
                                     createVersionData,
@@ -1257,6 +1294,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
                                 );
                             } else {
                                 const items = new ItemsApi();
+                                console.log(`Calling postItem for project ${projectId}`);
                                 version = await items.postItem(
                                     projectId,
                                     createVersionData,
@@ -1273,8 +1311,18 @@ router.post('/callback/designautomation', async (req, res, next) => {
                             lastError = err;
                             retries--;
 
+                            // Enhanced error logging
+                            console.log(`Error creating version/item (attempt ${3 - retries}/3):`);
+                            console.log(`  Message: ${err.message}`);
+                            if (err.response) {
+                                console.log(`  Status: ${err.response.status}`);
+                                console.log(`  Response body:`, JSON.stringify(err.response.data || err.response.body, null, 2));
+                            }
+                            if (err.body) {
+                                console.log(`  Error body:`, JSON.stringify(err.body, null, 2));
+                            }
+
                             if (retries > 0) {
-                                console.log(`Retry ${3 - retries}/3 after error:`, err.message);
                                 await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
                             }
                         }
