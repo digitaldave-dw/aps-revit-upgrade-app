@@ -311,12 +311,20 @@ class BulkProcessingQueue {
             } else {
                 // For cross-project upgrades, create a new item
                 console.log('   Creating item payload for cross-project upgrade');
+
+                // CRITICAL: Item extension type must use "items:" prefix, not "versions:"
+                // versionType is like "versions:autodesk.bim360:File"
+                // itemType must be "items:autodesk.bim360:File"
+                const itemType = versionInfo.versionType.replace('versions:', 'items:');
+                console.log(`   Item type: ${itemType}`);
+                console.log(`   Version type: ${versionInfo.versionType}`);
+
                 createPayload = createBodyOfPostItem(
                     file.fileItemName,
                     file.destinationFolderId,
                     storageInfo.StorageId,
-                    versionInfo.versionType,
-                    versionInfo.versionType
+                    itemType,                    // items:autodesk.bim360:File
+                    versionInfo.versionType      // versions:autodesk.bim360:File
                 );
                 // Ensure it's an item creation
                 createPayload.data.type = "items";
