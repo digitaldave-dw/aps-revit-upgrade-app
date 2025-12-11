@@ -1266,6 +1266,8 @@ router.post('/callback/designautomation', async (req, res, next) => {
                     console.log("Creating new version in BIM360/ACC for bulk processed file");
                     console.log(`Project ID: ${projectId}`);
                     console.log(`Version data type: ${createVersionData.data.type}`);
+                    console.log(`Is in-place upgrade: ${bulkWorkitemInfo.isInPlaceUpgrade}`);
+                    console.log(`Create payload:`, JSON.stringify(createVersionData, null, 2));
 
                     let version = null;
                     let retries = 3;
@@ -1275,6 +1277,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
                         try {
                             if (createVersionData.data.type === 'versions') {
                                 const versions = new VersionsApi();
+                                console.log(`Calling postVersion for project ${projectId}`);
                                 version = await versions.postVersion(
                                     projectId,
                                     createVersionData,
@@ -1283,6 +1286,7 @@ router.post('/callback/designautomation', async (req, res, next) => {
                                 );
                             } else {
                                 const items = new ItemsApi();
+                                console.log(`Calling postItem for project ${projectId}`);
                                 version = await items.postItem(
                                     projectId,
                                     createVersionData,
@@ -1299,8 +1303,18 @@ router.post('/callback/designautomation', async (req, res, next) => {
                             lastError = err;
                             retries--;
 
+                            // Enhanced error logging
+                            console.log(`Error creating version/item (attempt ${3 - retries}/3):`);
+                            console.log(`  Message: ${err.message}`);
+                            if (err.response) {
+                                console.log(`  Status: ${err.response.status}`);
+                                console.log(`  Response body:`, JSON.stringify(err.response.data || err.response.body, null, 2));
+                            }
+                            if (err.body) {
+                                console.log(`  Error body:`, JSON.stringify(err.body, null, 2));
+                            }
+
                             if (retries > 0) {
-                                console.log(`Retry ${3 - retries}/3 after error:`, err.message);
                                 await new Promise(resolve => setTimeout(resolve, (4 - retries) * 1000));
                             }
                         }
